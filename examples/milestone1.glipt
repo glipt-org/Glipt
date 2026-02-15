@@ -1,0 +1,34 @@
+# Milestone 1: Core language features
+# Expected output:
+# 7
+# Hello, World!
+# Hello, Glipt!
+# true
+# 3
+# glipt
+# 42
+
+# Arithmetic with correct precedence
+print(1 + 2 * 3)
+
+# String literals
+print("Hello, World!")
+
+# Variables and string concatenation
+name = "Glipt"
+print("Hello, " + name + "!")
+
+# Booleans and comparison
+print(10 > 5)
+
+# Lists
+items = [1, 2, 3]
+print(len(items))
+
+# Maps
+config = {"name": "glipt", "version": 1}
+print(config["name"])
+
+# Nested expressions
+x = (1 + 2) * (10 + 4)
+print(x)

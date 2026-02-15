@@ -1,0 +1,14 @@
+# Test parallel execution
+allow exec "echo*"
+allow exec "sleep*"
+
+# Sequential exec
+r1 = exec("echo task1")
+print(r1["output"])
+
+# Parallel exec - runs all commands concurrently
+results = parallel_exec(["echo hello", "echo world", "echo from glipt"])
+for r in results {
+    print(r["output"])
+}
+print("done: " + str(len(results)) + " tasks")

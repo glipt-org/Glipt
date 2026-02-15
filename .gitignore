@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+glipt
+glipt_debug
+*.o
+*.a
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Editor files
+.vscode/
+.idea/
+*.sublime-*
+
+# Test outputs
+/tmp/
+*.log
+
+# Benchmark outputs
+benchmarks/*.txt
+benchmarks/*.out

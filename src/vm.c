@@ -1,0 +1,1544 @@
+#include "vm.h"
+#include "compiler.h"
+#include "debug.h"
+#include "memory.h"
+#include "object.h"
+
+#include "process.h"
+#include "dataformat.h"
+#include "parallel.h"
+
+#include <stdarg.h>
+#include <math.h>
+#include <time.h>
+#include <ctype.h>
+#include <unistd.h>
+
+// Forward declarations
+static inline void push(VM* vm, Value value);
+static inline Value pop(VM* vm);
+static void runtimeError(VM* vm, const char* format, ...);
+static void raiseError(VM* vm, const char* message, const char* type);
+
+// ---- Native Functions ----
+
+static Value clockNative(VM* vm, int argCount, Value* args) {
+    (void)vm; (void)argCount; (void)args;
+    return NUMBER_VAL((double)clock() / CLOCKS_PER_SEC);
+}
+
+static Value lenNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1) return NIL_VAL;
+
+    if (IS_STRING(args[0])) {
+        return NUMBER_VAL(AS_STRING(args[0])->length);
+    }
+    if (IS_LIST(args[0])) {
+        return NUMBER_VAL(AS_LIST(args[0])->count);
+    }
+    return NIL_VAL;
+}
+
+static Value typeNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1) return OBJ_VAL(copyString(vm, "nil", 3));
+
+    Value val = args[0];
+    const char* name;
+    switch (val.type) {
+        case VAL_BOOL:   name = "bool"; break;
+        case VAL_NIL:    name = "nil"; break;
+        case VAL_NUMBER: name = "number"; break;
+        case VAL_OBJ:
+            switch (OBJ_TYPE(val)) {
+                case OBJ_STRING:   name = "string"; break;
+                case OBJ_FUNCTION:
+                case OBJ_CLOSURE:
+                case OBJ_NATIVE:   name = "function"; break;
+                case OBJ_LIST:     name = "list"; break;
+                case OBJ_MAP:      name = "map"; break;
+                default:           name = "object"; break;
+            }
+            break;
+        default: name = "unknown"; break;
+    }
+    return OBJ_VAL(copyString(vm, name, (int)strlen(name)));
+}
+
+static Value strNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1) return OBJ_VAL(copyString(vm, "", 0));
+
+    Value val = args[0];
+    if (IS_STRING(val)) return val;
+
+    char buf[64];
+    int len;
+    if (IS_NUMBER(val)) {
+        double num = AS_NUMBER(val);
+        if (num == (int)num) {
+            len = snprintf(buf, sizeof(buf), "%d", (int)num);
+        } else {
+            len = snprintf(buf, sizeof(buf), "%g", num);
+        }
+    } else if (IS_BOOL(val)) {
+        len = snprintf(buf, sizeof(buf), "%s", AS_BOOL(val) ? "true" : "false");
+    } else if (IS_NIL(val)) {
+        len = snprintf(buf, sizeof(buf), "nil");
+    } else {
+        len = snprintf(buf, sizeof(buf), "<object>");
+    }
+    return OBJ_VAL(copyString(vm, buf, len));
+}
+
+static Value appendNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 2 || !IS_LIST(args[0])) return NIL_VAL;
+    listAppend(vm, AS_LIST(args[0]), args[1]);
+    return args[0];
+}
+
+static Value popNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1 || !IS_LIST(args[0])) return NIL_VAL;
+    ObjList* list = AS_LIST(args[0]);
+    if (list->count == 0) return NIL_VAL;
+    list->count--;
+    return list->items[list->count];
+}
+
+static Value printNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    for (int i = 0; i < argCount; i++) {
+        if (i > 0) printf(" ");
+        printValue(args[i]);
+    }
+    printf("\n");
+    return NIL_VAL;
+}
+
+static Value printlnNative(VM* vm, int argCount, Value* args) {
+    return printNative(vm, argCount, args);
+}
+
+static Value inputNative(VM* vm, int argCount, Value* args) {
+    if (argCount > 0 && IS_STRING(args[0])) {
+        printf("%s", AS_CSTRING(args[0]));
+        fflush(stdout);
+    }
+    char buffer[1024];
+    if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
+        int len = (int)strlen(buffer);
+        if (len > 0 && buffer[len - 1] == '\n') len--;
+        return OBJ_VAL(copyString(vm, buffer, len));
+    }
+    return NIL_VAL;
+}
+
+static Value exitNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount > 0) {
+        if (IS_NUMBER(args[0])) {
+            exit((int)AS_NUMBER(args[0]));
+        } else if (IS_STRING(args[0])) {
+            fprintf(stderr, "%s\n", AS_CSTRING(args[0]));
+            exit(1);
+        }
+    }
+    exit(0);
+}
+
+static Value keysNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_MAP(args[0])) return NIL_VAL;
+    ObjMap* map = AS_MAP(args[0]);
+    ObjList* list = newList(vm);
+
+    for (int i = 0; i < map->table.capacity; i++) {
+        Entry* entry = &map->table.entries[i];
+        if (entry->key != NULL) {
+            listAppend(vm, list, OBJ_VAL(entry->key));
+        }
+    }
+    return OBJ_VAL(list);
+}
+
+static Value valuesNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_MAP(args[0])) return NIL_VAL;
+    ObjMap* map = AS_MAP(args[0]);
+    ObjList* list = newList(vm);
+
+    for (int i = 0; i < map->table.capacity; i++) {
+        Entry* entry = &map->table.entries[i];
+        if (entry->key != NULL) {
+            listAppend(vm, list, entry->value);
+        }
+    }
+    return OBJ_VAL(list);
+}
+
+static Value containsNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 2) return BOOL_VAL(false);
+
+    if (IS_LIST(args[0])) {
+        ObjList* list = AS_LIST(args[0]);
+        for (int i = 0; i < list->count; i++) {
+            if (valuesEqual(list->items[i], args[1])) return BOOL_VAL(true);
+        }
+        return BOOL_VAL(false);
+    }
+    if (IS_STRING(args[0]) && IS_STRING(args[1])) {
+        return BOOL_VAL(strstr(AS_CSTRING(args[0]), AS_CSTRING(args[1])) != NULL);
+    }
+    if (IS_MAP(args[0]) && IS_STRING(args[1])) {
+        Value dummy;
+        return BOOL_VAL(tableGet(&AS_MAP(args[0])->table, AS_STRING(args[1]), &dummy));
+    }
+    return BOOL_VAL(false);
+}
+
+static Value rangeNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 2 || !IS_NUMBER(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    double start = AS_NUMBER(args[0]);
+    double end = AS_NUMBER(args[1]);
+    double step = 1;
+    if (argCount >= 3 && IS_NUMBER(args[2])) step = AS_NUMBER(args[2]);
+    if (step == 0) return NIL_VAL;
+
+    ObjList* list = newList(vm);
+    if (step > 0) {
+        for (double i = start; i < end; i += step) {
+            listAppend(vm, list, NUMBER_VAL(i));
+        }
+    } else {
+        for (double i = start; i > end; i += step) {
+            listAppend(vm, list, NUMBER_VAL(i));
+        }
+    }
+    return OBJ_VAL(list);
+}
+
+static Value joinNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 1 || !IS_LIST(args[0])) return OBJ_VAL(copyString(vm, "", 0));
+    ObjList* list = AS_LIST(args[0]);
+    const char* sep = "";
+    int sepLen = 0;
+    if (argCount >= 2 && IS_STRING(args[1])) {
+        sep = AS_CSTRING(args[1]);
+        sepLen = AS_STRING(args[1])->length;
+    }
+
+    // Calculate total length
+    int totalLen = 0;
+    for (int i = 0; i < list->count; i++) {
+        if (IS_STRING(list->items[i])) {
+            totalLen += AS_STRING(list->items[i])->length;
+        } else {
+            totalLen += 20; // estimate for non-strings
+        }
+        if (i > 0) totalLen += sepLen;
+    }
+
+    char* buffer = ALLOCATE(char, totalLen + 1);
+    int pos = 0;
+    for (int i = 0; i < list->count; i++) {
+        if (i > 0) {
+            memcpy(buffer + pos, sep, sepLen);
+            pos += sepLen;
+        }
+        if (IS_STRING(list->items[i])) {
+            ObjString* s = AS_STRING(list->items[i]);
+            memcpy(buffer + pos, s->chars, s->length);
+            pos += s->length;
+        } else {
+            // Convert to string representation
+            char tmp[64];
+            int len;
+            if (IS_NUMBER(list->items[i])) {
+                double num = AS_NUMBER(list->items[i]);
+                if (num == (int)num) {
+                    len = snprintf(tmp, sizeof(tmp), "%d", (int)num);
+                } else {
+                    len = snprintf(tmp, sizeof(tmp), "%g", num);
+                }
+            } else if (IS_BOOL(list->items[i])) {
+                len = snprintf(tmp, sizeof(tmp), "%s", AS_BOOL(list->items[i]) ? "true" : "false");
+            } else {
+                len = snprintf(tmp, sizeof(tmp), "nil");
+            }
+            memcpy(buffer + pos, tmp, len);
+            pos += len;
+        }
+    }
+    buffer[pos] = '\0';
+
+    ObjString* result = copyString(vm, buffer, pos);
+    FREE_ARRAY(char, buffer, totalLen + 1);
+    return OBJ_VAL(result);
+}
+
+static Value execNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 1 || !IS_STRING(args[0])) {
+        return NIL_VAL;
+    }
+
+    const char* command = AS_CSTRING(args[0]);
+
+    // Permission check
+    if (!hasPermission(&vm->permissions, PERM_EXEC, command)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Permission denied: exec \"%s\"", command);
+        raiseError(vm, msg, "permission");
+        return NIL_VAL;
+    }
+
+    ProcessResult result = processExec(command);
+
+    // Build result map: {stdout: "...", stderr: "...", exitCode: N}
+    ObjMap* map = newMap(vm);
+
+    // Protect map from GC
+    Value mapVal = OBJ_VAL(map);
+    *vm->stackTop++ = mapVal;
+
+    ObjString* stdoutKey = copyString(vm, "stdout", 6);
+    ObjString* stdoutVal = copyString(vm, result.stdoutData ? result.stdoutData : "",
+                                       result.stdoutLength);
+    tableSet(&map->table, stdoutKey, OBJ_VAL(stdoutVal));
+
+    ObjString* stderrKey = copyString(vm, "stderr", 6);
+    ObjString* stderrVal = copyString(vm, result.stderrData ? result.stderrData : "",
+                                       result.stderrLength);
+    tableSet(&map->table, stderrKey, OBJ_VAL(stderrVal));
+
+    ObjString* exitCodeKey = copyString(vm, "exitCode", 8);
+    tableSet(&map->table, exitCodeKey, NUMBER_VAL(result.exitCode));
+
+    // Strip trailing newline from stdout for convenience
+    ObjString* outputKey = copyString(vm, "output", 6);
+    int outLen = result.stdoutLength;
+    if (outLen > 0 && result.stdoutData[outLen - 1] == '\n') outLen--;
+    ObjString* outputVal = copyString(vm, result.stdoutData ? result.stdoutData : "", outLen);
+    tableSet(&map->table, outputKey, OBJ_VAL(outputVal));
+
+    vm->stackTop--; // unprotect map
+
+    // Raise error on non-zero exit code
+    if (result.exitCode != 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Command failed with exit code %d: %s",
+                 result.exitCode, command);
+        raiseError(vm, msg, "exec");
+    }
+
+    processResultFree(&result);
+
+    return mapVal;
+}
+
+static Value parseJsonNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    return parseJSON(vm, str->chars, str->length);
+}
+
+static Value toJsonNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1) return OBJ_VAL(copyString(vm, "null", 4));
+    return toJSON(vm, args[0]);
+}
+
+static Value readFileNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+
+    const char* path = AS_CSTRING(args[0]);
+
+    // Permission check
+    if (!hasPermission(&vm->permissions, PERM_READ, path)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Permission denied: read \"%s\"", path);
+        raiseError(vm, msg, "permission");
+        return NIL_VAL;
+    }
+
+    FILE* file = fopen(path, "rb");
+    if (file == NULL) return NIL_VAL;
+
+    fseek(file, 0L, SEEK_END);
+    size_t size = ftell(file);
+    rewind(file);
+
+    char* buffer = (char*)malloc(size + 1);
+    if (buffer == NULL) {
+        fclose(file);
+        return NIL_VAL;
+    }
+
+    size_t bytesRead = fread(buffer, 1, size, file);
+    buffer[bytesRead] = '\0';
+    fclose(file);
+
+    // Auto-detect format by extension
+    int pathLen = AS_STRING(args[0])->length;
+    if (pathLen > 5 && memcmp(path + pathLen - 5, ".json", 5) == 0) {
+        Value result = parseJSON(vm, buffer, (int)bytesRead);
+        free(buffer);
+        return result;
+    }
+
+    ObjString* result = copyString(vm, buffer, (int)bytesRead);
+    free(buffer);
+    return OBJ_VAL(result);
+}
+
+static Value writeFileNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 2 || !IS_STRING(args[0]) || !IS_STRING(args[1])) {
+        return BOOL_VAL(false);
+    }
+
+    const char* path = AS_CSTRING(args[0]);
+
+    // Permission check
+    if (!hasPermission(&vm->permissions, PERM_WRITE, path)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Permission denied: write \"%s\"", path);
+        raiseError(vm, msg, "permission");
+        return BOOL_VAL(false);
+    }
+    ObjString* content = AS_STRING(args[1]);
+
+    FILE* file = fopen(path, "wb");
+    if (file == NULL) return BOOL_VAL(false);
+
+    size_t written = fwrite(content->chars, 1, content->length, file);
+    fclose(file);
+
+    return BOOL_VAL(written == (size_t)content->length);
+}
+
+static Value envNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+
+    const char* name = AS_CSTRING(args[0]);
+    if (!hasPermission(&vm->permissions, PERM_ENV, name)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Permission denied: env \"%s\"", name);
+        raiseError(vm, msg, "permission");
+        return NIL_VAL;
+    }
+
+    const char* val = getenv(name);
+    if (val == NULL) return NIL_VAL;
+    return OBJ_VAL(copyString(vm, val, (int)strlen(val)));
+}
+
+static Value sleepNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1 || !IS_NUMBER(args[0])) return NIL_VAL;
+    double seconds = AS_NUMBER(args[0]);
+    if (seconds > 0) {
+        usleep((useconds_t)(seconds * 1000000));
+    }
+    return NIL_VAL;
+}
+
+static Value assertNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount < 1) return NIL_VAL;
+    if (isFalsey(args[0])) {
+        if (argCount >= 2 && IS_STRING(args[1])) {
+            fprintf(stderr, "Assertion failed: %s\n", AS_CSTRING(args[1]));
+        } else {
+            fprintf(stderr, "Assertion failed\n");
+        }
+        exit(1);
+    }
+    return BOOL_VAL(true);
+}
+
+static Value splitNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 2 || !IS_STRING(args[0]) || !IS_STRING(args[1])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    ObjString* delim = AS_STRING(args[1]);
+    ObjList* list = newList(vm);
+
+    // Protect from GC
+    *vm->stackTop++ = OBJ_VAL(list);
+
+    if (delim->length == 0) {
+        // Split into characters
+        for (int i = 0; i < str->length; i++) {
+            listAppend(vm, list, OBJ_VAL(copyString(vm, &str->chars[i], 1)));
+        }
+    } else {
+        const char* start = str->chars;
+        const char* end = str->chars + str->length;
+        const char* pos;
+
+        while ((pos = strstr(start, delim->chars)) != NULL) {
+            listAppend(vm, list, OBJ_VAL(copyString(vm, start, (int)(pos - start))));
+            start = pos + delim->length;
+        }
+        listAppend(vm, list, OBJ_VAL(copyString(vm, start, (int)(end - start))));
+    }
+
+    vm->stackTop--;
+    return OBJ_VAL(list);
+}
+
+static Value trimNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    int start = 0, end = str->length;
+    while (start < end && (str->chars[start] == ' ' || str->chars[start] == '\t' ||
+           str->chars[start] == '\n' || str->chars[start] == '\r')) start++;
+    while (end > start && (str->chars[end-1] == ' ' || str->chars[end-1] == '\t' ||
+           str->chars[end-1] == '\n' || str->chars[end-1] == '\r')) end--;
+    return OBJ_VAL(copyString(vm, str->chars + start, end - start));
+}
+
+static Value replaceNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 3 || !IS_STRING(args[0]) || !IS_STRING(args[1]) || !IS_STRING(args[2]))
+        return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    ObjString* old = AS_STRING(args[1]);
+    ObjString* newStr = AS_STRING(args[2]);
+
+    if (old->length == 0) return args[0];
+
+    // Count occurrences
+    int count = 0;
+    const char* pos = str->chars;
+    while ((pos = strstr(pos, old->chars)) != NULL) {
+        count++;
+        pos += old->length;
+    }
+    if (count == 0) return args[0];
+
+    int newLen = str->length + count * (newStr->length - old->length);
+    char* buf = (char*)malloc(newLen + 1);
+    char* out = buf;
+    const char* src = str->chars;
+
+    while ((pos = strstr(src, old->chars)) != NULL) {
+        int chunk = (int)(pos - src);
+        memcpy(out, src, chunk);
+        out += chunk;
+        memcpy(out, newStr->chars, newStr->length);
+        out += newStr->length;
+        src = pos + old->length;
+    }
+    int remaining = (int)(str->chars + str->length - src);
+    memcpy(out, src, remaining);
+    out[remaining] = '\0';
+
+    ObjString* result = copyString(vm, buf, newLen);
+    free(buf);
+    return OBJ_VAL(result);
+}
+
+static Value upperNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    char* buf = (char*)malloc(str->length + 1);
+    for (int i = 0; i < str->length; i++) {
+        buf[i] = (char)toupper((unsigned char)str->chars[i]);
+    }
+    buf[str->length] = '\0';
+    ObjString* result = copyString(vm, buf, str->length);
+    free(buf);
+    return OBJ_VAL(result);
+}
+
+static Value lowerNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    char* buf = (char*)malloc(str->length + 1);
+    for (int i = 0; i < str->length; i++) {
+        buf[i] = (char)tolower((unsigned char)str->chars[i]);
+    }
+    buf[str->length] = '\0';
+    ObjString* result = copyString(vm, buf, str->length);
+    free(buf);
+    return OBJ_VAL(result);
+}
+
+static Value startsWithNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 2 || !IS_STRING(args[0]) || !IS_STRING(args[1])) return BOOL_VAL(false);
+    ObjString* str = AS_STRING(args[0]);
+    ObjString* prefix = AS_STRING(args[1]);
+    if (prefix->length > str->length) return BOOL_VAL(false);
+    return BOOL_VAL(memcmp(str->chars, prefix->chars, prefix->length) == 0);
+}
+
+static Value endsWithNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 2 || !IS_STRING(args[0]) || !IS_STRING(args[1])) return BOOL_VAL(false);
+    ObjString* str = AS_STRING(args[0]);
+    ObjString* suffix = AS_STRING(args[1]);
+    if (suffix->length > str->length) return BOOL_VAL(false);
+    return BOOL_VAL(memcmp(str->chars + str->length - suffix->length,
+                            suffix->chars, suffix->length) == 0);
+}
+
+static Value numNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1) return NIL_VAL;
+    if (IS_NUMBER(args[0])) return args[0];
+    if (IS_STRING(args[0])) {
+        char* end;
+        double result = strtod(AS_CSTRING(args[0]), &end);
+        if (end == AS_CSTRING(args[0])) return NIL_VAL;
+        return NUMBER_VAL(result);
+    }
+    if (IS_BOOL(args[0])) return NUMBER_VAL(AS_BOOL(args[0]) ? 1 : 0);
+    return NIL_VAL;
+}
+
+static Value sortNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1 || !IS_LIST(args[0])) return NIL_VAL;
+    ObjList* list = AS_LIST(args[0]);
+
+    // Simple bubble sort (good enough for scripting)
+    for (int i = 0; i < list->count - 1; i++) {
+        for (int j = 0; j < list->count - i - 1; j++) {
+            if (IS_NUMBER(list->items[j]) && IS_NUMBER(list->items[j+1])) {
+                if (AS_NUMBER(list->items[j]) > AS_NUMBER(list->items[j+1])) {
+                    Value tmp = list->items[j];
+                    list->items[j] = list->items[j+1];
+                    list->items[j+1] = tmp;
+                }
+            }
+        }
+    }
+    return args[0];
+}
+
+static Value mapFnNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 2 || !IS_LIST(args[0])) return NIL_VAL;
+    ObjList* list = AS_LIST(args[0]);
+    Value fn = args[1];
+    ObjList* result = newList(vm);
+
+    *vm->stackTop++ = OBJ_VAL(result);
+
+    for (int i = 0; i < list->count; i++) {
+        // Call fn(item) - push fn, push arg, call
+        *vm->stackTop++ = fn;
+        *vm->stackTop++ = list->items[i];
+
+        if (!IS_CLOSURE(fn) && !IS_NATIVE(fn)) {
+            vm->stackTop -= 2;
+            continue;
+        }
+
+        // For native functions, call directly
+        if (IS_NATIVE(fn)) {
+            Value res = AS_NATIVE(fn)->function(vm, 1, vm->stackTop - 1);
+            vm->stackTop -= 2;
+            listAppend(vm, result, res);
+        } else {
+            // Can't easily call closures from native context
+            // For now, skip
+            vm->stackTop -= 2;
+        }
+    }
+
+    vm->stackTop--; // pop result protection
+    return OBJ_VAL(result);
+}
+
+static Value filterNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 2 || !IS_LIST(args[0])) return NIL_VAL;
+    ObjList* list = AS_LIST(args[0]);
+    Value fn = args[1];
+    ObjList* result = newList(vm);
+
+    *vm->stackTop++ = OBJ_VAL(result);
+
+    for (int i = 0; i < list->count; i++) {
+        if (IS_NATIVE(fn)) {
+            Value res = AS_NATIVE(fn)->function(vm, 1, &list->items[i]);
+            if (!isFalsey(res)) {
+                listAppend(vm, result, list->items[i]);
+            }
+        }
+    }
+
+    vm->stackTop--;
+    return OBJ_VAL(result);
+}
+
+static Value boolNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1) return BOOL_VAL(false);
+    return BOOL_VAL(!isFalsey(args[0]));
+}
+
+static Value reduceNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 2 || !IS_LIST(args[0])) return NIL_VAL;
+    ObjList* list = AS_LIST(args[0]);
+    Value fn = args[1];
+    if (list->count == 0) return argCount >= 3 ? args[2] : NIL_VAL;
+
+    Value acc = argCount >= 3 ? args[2] : list->items[0];
+    int start = argCount >= 3 ? 0 : 1;
+
+    for (int i = start; i < list->count; i++) {
+        if (IS_NATIVE(fn)) {
+            Value callArgs[2] = { acc, list->items[i] };
+            acc = AS_NATIVE(fn)->function(vm, 2, callArgs);
+        }
+    }
+    return acc;
+}
+
+static Value debugNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    for (int i = 0; i < argCount; i++) {
+        if (i > 0) fprintf(stderr, " ");
+        fprintf(stderr, "[DEBUG] ");
+        printValue(args[i]);
+    }
+    fprintf(stderr, "\n");
+    return NIL_VAL;
+}
+
+static Value formatNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 1 || !IS_STRING(args[0])) return NIL_VAL;
+    ObjString* fmt = AS_STRING(args[0]);
+
+    // Simple {} placeholder replacement
+    int bufSize = fmt->length * 2 + 256;
+    char* buf = (char*)malloc(bufSize);
+    int out = 0;
+    int argIdx = 1;
+
+    for (int i = 0; i < fmt->length; i++) {
+        if (i + 1 < fmt->length && fmt->chars[i] == '{' && fmt->chars[i + 1] == '}') {
+            if (argIdx < argCount) {
+                // Print value to a temp buffer
+                char temp[256];
+                int len = 0;
+                Value v = args[argIdx++];
+                if (IS_NUMBER(v)) {
+                    double n = AS_NUMBER(v);
+                    if (n == (int)n) len = snprintf(temp, sizeof(temp), "%d", (int)n);
+                    else len = snprintf(temp, sizeof(temp), "%g", n);
+                } else if (IS_BOOL(v)) {
+                    len = snprintf(temp, sizeof(temp), "%s", AS_BOOL(v) ? "true" : "false");
+                } else if (IS_NIL(v)) {
+                    len = snprintf(temp, sizeof(temp), "nil");
+                } else if (IS_STRING(v)) {
+                    ObjString* s = AS_STRING(v);
+                    len = s->length < (int)sizeof(temp) - 1 ? s->length : (int)sizeof(temp) - 1;
+                    memcpy(temp, s->chars, len);
+                } else {
+                    len = snprintf(temp, sizeof(temp), "<object>");
+                }
+                // Grow buffer if needed
+                if (out + len >= bufSize) {
+                    bufSize = (out + len) * 2;
+                    buf = (char*)realloc(buf, bufSize);
+                }
+                memcpy(buf + out, temp, len);
+                out += len;
+            }
+            i++; // skip '}'
+        } else {
+            if (out + 1 >= bufSize) {
+                bufSize *= 2;
+                buf = (char*)realloc(buf, bufSize);
+            }
+            buf[out++] = fmt->chars[i];
+        }
+    }
+    buf[out] = '\0';
+
+    ObjString* result = copyString(vm, buf, out);
+    free(buf);
+    return OBJ_VAL(result);
+}
+
+// ---- VM Init ----
+
+void initVM(VM* vm) {
+    vm->stackTop = vm->stack;
+    vm->frameCount = 0;
+
+    initTable(&vm->globals);
+    initTable(&vm->strings);
+
+    vm->openUpvalues = NULL;
+    vm->objects = NULL;
+    vm->grayCount = 0;
+    vm->grayCapacity = 0;
+    vm->grayStack = NULL;
+    vm->bytesAllocated = 0;
+    vm->nextGC = 1024 * 1024; // 1 MB initial threshold
+
+    initPermissions(&vm->permissions);
+    vm->handlerCount = 0;
+    vm->hasError = false;
+    vm->currentError = NIL_VAL;
+
+    setCurrentVM(vm);
+
+    // Register built-in functions
+    defineNative(vm, "print", printNative, -1);
+    defineNative(vm, "println", printlnNative, -1);
+    defineNative(vm, "input", inputNative, -1);
+    defineNative(vm, "exit", exitNative, -1);
+    defineNative(vm, "clock", clockNative, 0);
+    defineNative(vm, "len", lenNative, 1);
+    defineNative(vm, "type", typeNative, 1);
+    defineNative(vm, "str", strNative, 1);
+    defineNative(vm, "append", appendNative, 2);
+    defineNative(vm, "pop", popNative, 1);
+    defineNative(vm, "keys", keysNative, 1);
+    defineNative(vm, "values", valuesNative, 1);
+    defineNative(vm, "contains", containsNative, 2);
+    defineNative(vm, "range", rangeNative, -1);
+    defineNative(vm, "join", joinNative, -1);
+    defineNative(vm, "exec", execNative, -1);
+
+    // Data format
+    defineNative(vm, "parse_json", parseJsonNative, 1);
+    defineNative(vm, "to_json", toJsonNative, 1);
+
+    // File I/O
+    defineNative(vm, "read", readFileNative, 1);
+    defineNative(vm, "write", writeFileNative, 2);
+
+    // System
+    defineNative(vm, "env", envNative, 1);
+    defineNative(vm, "sleep", sleepNative, 1);
+    defineNative(vm, "assert", assertNative, -1);
+
+    // String functions
+    defineNative(vm, "split", splitNative, 2);
+    defineNative(vm, "trim", trimNative, 1);
+    defineNative(vm, "replace", replaceNative, 3);
+    defineNative(vm, "upper", upperNative, 1);
+    defineNative(vm, "lower", lowerNative, 1);
+    defineNative(vm, "starts_with", startsWithNative, 2);
+    defineNative(vm, "ends_with", endsWithNative, 2);
+
+    // Type conversion
+    defineNative(vm, "num", numNative, 1);
+
+    // List functions
+    defineNative(vm, "sort", sortNative, 1);
+    defineNative(vm, "map_fn", mapFnNative, 2);
+    defineNative(vm, "filter", filterNative, 2);
+
+    // More type conversions
+    defineNative(vm, "bool", boolNative, 1);
+
+    // Higher-order
+    defineNative(vm, "reduce", reduceNative, -1);
+
+    // Formatting & Debug
+    defineNative(vm, "format", formatNative, -1);
+    defineNative(vm, "debug", debugNative, -1);
+
+    // Parallel execution
+    defineNative(vm, "parallel_exec", parallelExec, 1);
+}
+
+void freeVM(VM* vm) {
+    freeTable(&vm->globals);
+    freeTable(&vm->strings);
+    freePermissions(&vm->permissions);
+    freeObjects(vm);
+    setCurrentVM(NULL);
+}
+
+void defineNative(VM* vm, const char* name, NativeFn function, int arity) {
+    ObjString* nameStr = copyString(vm, name, (int)strlen(name));
+    // Push/pop to protect from GC
+    *vm->stackTop++ = OBJ_VAL(nameStr);
+    *vm->stackTop++ = OBJ_VAL(newNative(vm, function, name, arity));
+    tableSet(&vm->globals, AS_STRING(vm->stack[0]), vm->stack[1]);
+    vm->stackTop -= 2;
+}
+
+// ---- Runtime Errors ----
+
+static void runtimeError(VM* vm, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vfprintf(stderr, format, args);
+    va_end(args);
+    fputs("\n", stderr);
+
+    for (int i = vm->frameCount - 1; i >= 0; i--) {
+        CallFrame* frame = &vm->frames[i];
+        ObjFunction* function = frame->closure->function;
+        size_t instruction = frame->ip - function->chunk.code - 1;
+        fprintf(stderr, "[line %d] in ", function->chunk.lines[instruction]);
+        if (function->name == NULL) {
+            fprintf(stderr, "script\n");
+        } else {
+            fprintf(stderr, "%s()\n", function->name->chars);
+        }
+    }
+
+    vm->stackTop = vm->stack;
+    vm->frameCount = 0;
+}
+
+// Create an error map and set it as pending error.
+// If there's a handler, the dispatch loop will jump to it.
+// If not, the error is printed and execution terminates.
+static void raiseError(VM* vm, const char* message, const char* type) {
+    ObjMap* errorMap = newMap(vm);
+    push(vm, OBJ_VAL(errorMap)); // GC protection
+
+    ObjString* msgKey = copyString(vm, "message", 7);
+    ObjString* msgVal = copyString(vm, message, (int)strlen(message));
+    tableSet(&errorMap->table, msgKey, OBJ_VAL(msgVal));
+
+    ObjString* typeKey = copyString(vm, "type", 4);
+    ObjString* typeVal = copyString(vm, type, (int)strlen(type));
+    tableSet(&errorMap->table, typeKey, OBJ_VAL(typeVal));
+
+    pop(vm); // unprotect
+
+    vm->hasError = true;
+    vm->currentError = OBJ_VAL(errorMap);
+}
+
+// ---- Stack Operations ----
+
+static inline void push(VM* vm, Value value) {
+    *vm->stackTop = value;
+    vm->stackTop++;
+}
+
+static inline Value pop(VM* vm) {
+    vm->stackTop--;
+    return *vm->stackTop;
+}
+
+static inline Value peek(VM* vm, int distance) {
+    return vm->stackTop[-1 - distance];
+}
+
+// ---- Call ----
+
+static bool callClosure(VM* vm, ObjClosure* closure, int argCount) {
+    if (argCount != closure->function->arity) {
+        runtimeError(vm, "Expected %d arguments but got %d.",
+                     closure->function->arity, argCount);
+        return false;
+    }
+
+    if (vm->frameCount == FRAMES_MAX) {
+        runtimeError(vm, "Stack overflow.");
+        return false;
+    }
+
+    CallFrame* frame = &vm->frames[vm->frameCount++];
+    frame->closure = closure;
+    frame->ip = closure->function->chunk.code;
+    frame->slots = vm->stackTop - argCount - 1;
+    return true;
+}
+
+static bool callValue(VM* vm, Value callee, int argCount) {
+    if (IS_OBJ(callee)) {
+        switch (OBJ_TYPE(callee)) {
+            case OBJ_CLOSURE:
+                return callClosure(vm, AS_CLOSURE(callee), argCount);
+            case OBJ_NATIVE: {
+                ObjNative* native = AS_NATIVE(callee);
+                if (native->arity >= 0 && argCount != native->arity) {
+                    runtimeError(vm, "Expected %d arguments but got %d.",
+                                 native->arity, argCount);
+                    return false;
+                }
+                Value result = native->function(vm, argCount,
+                    vm->stackTop - argCount);
+                vm->stackTop -= argCount + 1;
+                push(vm, result);
+                return true;
+            }
+            default:
+                break;
+        }
+    }
+    runtimeError(vm, "Can only call functions.");
+    return false;
+}
+
+// ---- Upvalue Operations ----
+
+static ObjUpvalue* captureUpvalue(VM* vm, Value* local) {
+    ObjUpvalue* prevUpvalue = NULL;
+    ObjUpvalue* upvalue = vm->openUpvalues;
+
+    while (upvalue != NULL && upvalue->location > local) {
+        prevUpvalue = upvalue;
+        upvalue = upvalue->next;
+    }
+
+    if (upvalue != NULL && upvalue->location == local) {
+        return upvalue;
+    }
+
+    ObjUpvalue* createdUpvalue = newUpvalue(vm, local);
+    createdUpvalue->next = upvalue;
+
+    if (prevUpvalue == NULL) {
+        vm->openUpvalues = createdUpvalue;
+    } else {
+        prevUpvalue->next = createdUpvalue;
+    }
+
+    return createdUpvalue;
+}
+
+static void closeUpvalues(VM* vm, Value* last) {
+    while (vm->openUpvalues != NULL && vm->openUpvalues->location >= last) {
+        ObjUpvalue* upvalue = vm->openUpvalues;
+        upvalue->closed = *upvalue->location;
+        upvalue->location = &upvalue->closed;
+        vm->openUpvalues = upvalue->next;
+    }
+}
+
+// ---- String Concatenation ----
+
+static void concatenate(VM* vm) {
+    ObjString* b = AS_STRING(peek(vm, 0));
+    ObjString* a = AS_STRING(peek(vm, 1));
+
+    int length = a->length + b->length;
+    char* chars = ALLOCATE(char, length + 1);
+    memcpy(chars, a->chars, a->length);
+    memcpy(chars + a->length, b->chars, b->length);
+    chars[length] = '\0';
+
+    ObjString* result = takeString(vm, chars, length);
+    pop(vm);
+    pop(vm);
+    push(vm, OBJ_VAL(result));
+}
+
+// ---- Execution Loop ----
+
+static InterpretResult run(VM* vm) {
+    CallFrame* frame = &vm->frames[vm->frameCount - 1];
+
+#define READ_BYTE() (*frame->ip++)
+#define READ_SHORT() \
+    (frame->ip += 2, (uint16_t)((frame->ip[-2] << 8) | frame->ip[-1]))
+#define READ_CONSTANT() (frame->closure->function->chunk.constants.values[READ_BYTE()])
+#define READ_STRING() AS_STRING(READ_CONSTANT())
+#define BINARY_OP(valueType, op) \
+    do { \
+        if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) { \
+            runtimeError(vm, "Operands must be numbers."); \
+            return INTERPRET_RUNTIME_ERROR; \
+        } \
+        double b = AS_NUMBER(pop(vm)); \
+        double a = AS_NUMBER(pop(vm)); \
+        push(vm, valueType(a op b)); \
+    } while (false)
+
+    for (;;) {
+
+#ifdef DEBUG_TRACE
+        // Print stack
+        printf("          ");
+        for (Value* slot = vm->stack; slot < vm->stackTop; slot++) {
+            printf("[ ");
+            printValue(*slot);
+            printf(" ]");
+        }
+        printf("\n");
+        disassembleInstruction(&frame->closure->function->chunk,
+            (int)(frame->ip - frame->closure->function->chunk.code));
+#endif
+
+        uint8_t instruction;
+        switch (instruction = READ_BYTE()) {
+            case OP_CONSTANT: {
+                Value constant = READ_CONSTANT();
+                push(vm, constant);
+                break;
+            }
+
+            case OP_NIL:   push(vm, NIL_VAL); break;
+            case OP_TRUE:  push(vm, BOOL_VAL(true)); break;
+            case OP_FALSE: push(vm, BOOL_VAL(false)); break;
+
+            case OP_ADD: {
+                if (IS_STRING(peek(vm, 0)) && IS_STRING(peek(vm, 1))) {
+                    concatenate(vm);
+                } else if (IS_NUMBER(peek(vm, 0)) && IS_NUMBER(peek(vm, 1))) {
+                    double b = AS_NUMBER(pop(vm));
+                    double a = AS_NUMBER(pop(vm));
+                    push(vm, NUMBER_VAL(a + b));
+                } else {
+                    runtimeError(vm, "Operands must be two numbers or two strings.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                break;
+            }
+
+            case OP_SUBTRACT: BINARY_OP(NUMBER_VAL, -); break;
+            case OP_MULTIPLY: BINARY_OP(NUMBER_VAL, *); break;
+            case OP_DIVIDE: {
+                if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) {
+                    runtimeError(vm, "Operands must be numbers.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                double b = AS_NUMBER(pop(vm));
+                if (b == 0) {
+                    runtimeError(vm, "Division by zero.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                double a = AS_NUMBER(pop(vm));
+                push(vm, NUMBER_VAL(a / b));
+                break;
+            }
+            case OP_MODULO: {
+                if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) {
+                    runtimeError(vm, "Operands must be numbers.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                double b = AS_NUMBER(pop(vm));
+                double a = AS_NUMBER(pop(vm));
+                push(vm, NUMBER_VAL(fmod(a, b)));
+                break;
+            }
+
+            case OP_NEGATE: {
+                if (!IS_NUMBER(peek(vm, 0))) {
+                    runtimeError(vm, "Operand must be a number.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                push(vm, NUMBER_VAL(-AS_NUMBER(pop(vm))));
+                break;
+            }
+
+            case OP_EQUAL: {
+                Value b = pop(vm);
+                Value a = pop(vm);
+                push(vm, BOOL_VAL(valuesEqual(a, b)));
+                break;
+            }
+            case OP_NOT_EQUAL: {
+                Value b = pop(vm);
+                Value a = pop(vm);
+                push(vm, BOOL_VAL(!valuesEqual(a, b)));
+                break;
+            }
+            case OP_GREATER:       BINARY_OP(BOOL_VAL, >); break;
+            case OP_GREATER_EQUAL: BINARY_OP(BOOL_VAL, >=); break;
+            case OP_LESS:          BINARY_OP(BOOL_VAL, <); break;
+            case OP_LESS_EQUAL:    BINARY_OP(BOOL_VAL, <=); break;
+
+            case OP_NOT:
+                push(vm, BOOL_VAL(isFalsey(pop(vm))));
+                break;
+
+            case OP_GET_LOCAL: {
+                uint8_t slot = READ_BYTE();
+                push(vm, frame->slots[slot]);
+                break;
+            }
+            case OP_SET_LOCAL: {
+                uint8_t slot = READ_BYTE();
+                frame->slots[slot] = peek(vm, 0);
+                break;
+            }
+
+            case OP_GET_GLOBAL: {
+                ObjString* name = READ_STRING();
+                Value value;
+                if (!tableGet(&vm->globals, name, &value)) {
+                    runtimeError(vm, "Undefined variable '%s'.", name->chars);
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                push(vm, value);
+                break;
+            }
+            case OP_SET_GLOBAL: {
+                ObjString* name = READ_STRING();
+                if (tableSet(&vm->globals, name, peek(vm, 0))) {
+                    // New key means variable didn't exist, define it
+                    // (Glipt allows implicit globals)
+                }
+                break;
+            }
+            case OP_DEFINE_GLOBAL: {
+                ObjString* name = READ_STRING();
+                tableSet(&vm->globals, name, peek(vm, 0));
+                pop(vm);
+                break;
+            }
+
+            case OP_GET_UPVALUE: {
+                uint8_t slot = READ_BYTE();
+                push(vm, *frame->closure->upvalues[slot]->location);
+                break;
+            }
+            case OP_SET_UPVALUE: {
+                uint8_t slot = READ_BYTE();
+                *frame->closure->upvalues[slot]->location = peek(vm, 0);
+                break;
+            }
+
+            case OP_JUMP: {
+                uint16_t offset = READ_SHORT();
+                frame->ip += offset;
+                break;
+            }
+            case OP_JUMP_IF_FALSE: {
+                uint16_t offset = READ_SHORT();
+                if (isFalsey(peek(vm, 0))) frame->ip += offset;
+                break;
+            }
+            case OP_LOOP: {
+                uint16_t offset = READ_SHORT();
+                frame->ip -= offset;
+                break;
+            }
+
+            case OP_CALL: {
+                int argCount = READ_BYTE();
+                if (!callValue(vm, peek(vm, argCount), argCount)) {
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                frame = &vm->frames[vm->frameCount - 1];
+
+                // Check for raised errors (e.g. from exec, permission denied)
+                if (vm->hasError) {
+                    if (vm->handlerCount > 0) {
+                        ErrorHandler* handler = &vm->handlers[vm->handlerCount - 1];
+                        // Unwind to handler state
+                        vm->frameCount = handler->frameCount;
+                        frame = &vm->frames[vm->frameCount - 1];
+                        vm->stackTop = handler->stackTop;
+                        // Push error value for the handler to use
+                        push(vm, vm->currentError);
+                        frame->ip = handler->handlerIP;
+                        vm->hasError = false;
+                        vm->currentError = NIL_VAL;
+                    } else {
+                        // No handler - print error and terminate
+                        if (IS_OBJ(vm->currentError) && IS_MAP(vm->currentError)) {
+                            ObjMap* errMap = AS_MAP(vm->currentError);
+                            Value msgVal;
+                            ObjString* msgKey = copyString(vm, "message", 7);
+                            if (tableGet(&errMap->table, msgKey, &msgVal) && IS_STRING(msgVal)) {
+                                runtimeError(vm, "%s", AS_CSTRING(msgVal));
+                            } else {
+                                runtimeError(vm, "Runtime error.");
+                            }
+                        } else {
+                            runtimeError(vm, "Runtime error.");
+                        }
+                        vm->hasError = false;
+                        vm->currentError = NIL_VAL;
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                }
+                break;
+            }
+
+            case OP_CLOSURE: {
+                ObjFunction* function = AS_FUNCTION(READ_CONSTANT());
+                ObjClosure* closure = newClosure(vm, function);
+                push(vm, OBJ_VAL(closure));
+                for (int i = 0; i < closure->upvalueCount; i++) {
+                    uint8_t isLocal = READ_BYTE();
+                    uint8_t index = READ_BYTE();
+                    if (isLocal) {
+                        closure->upvalues[i] = captureUpvalue(vm, frame->slots + index);
+                    } else {
+                        closure->upvalues[i] = frame->closure->upvalues[index];
+                    }
+                }
+                break;
+            }
+
+            case OP_CLOSE_UPVALUE:
+                closeUpvalues(vm, vm->stackTop - 1);
+                pop(vm);
+                break;
+
+            case OP_RETURN: {
+                Value result = pop(vm);
+                closeUpvalues(vm, frame->slots);
+                vm->frameCount--;
+                if (vm->frameCount == 0) {
+                    pop(vm);
+                    return INTERPRET_OK;
+                }
+                vm->stackTop = frame->slots;
+                push(vm, result);
+                frame = &vm->frames[vm->frameCount - 1];
+                break;
+            }
+
+            case OP_PRINT: {
+                printValue(pop(vm));
+                printf("\n");
+                break;
+            }
+
+            case OP_POP:
+                pop(vm);
+                break;
+
+            case OP_BUILD_LIST: {
+                int count = READ_BYTE();
+                ObjList* list = newList(vm);
+                // Items are on the stack in order, but we need to
+                // get them from bottom to top
+                // The items are: stackTop[-count] ... stackTop[-1]
+                // First, push the list to protect it from GC
+                push(vm, OBJ_VAL(list));
+
+                for (int i = count; i > 0; i--) {
+                    // peek past the list we just pushed
+                    listAppend(vm, list, vm->stackTop[-1 - i]);
+                }
+
+                // Remove the items and the list from the stack
+                // Put the list back
+                vm->stackTop -= count + 1;
+                push(vm, OBJ_VAL(list));
+                break;
+            }
+
+            case OP_BUILD_MAP: {
+                int count = READ_BYTE(); // number of key-value pairs
+                ObjMap* map = newMap(vm);
+                push(vm, OBJ_VAL(map)); // GC protection
+
+                // Pairs are on stack: key1, val1, key2, val2, ...
+                // stackTop[-1] = map, then pairs below
+                for (int i = count; i > 0; i--) {
+                    Value val = vm->stackTop[-1 - (2 * i - 1)]; // value
+                    Value key = vm->stackTop[-1 - (2 * i)];     // key
+                    if (!IS_STRING(key)) {
+                        runtimeError(vm, "Map key must be a string.");
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    tableSet(&map->table, AS_STRING(key), val);
+                }
+
+                vm->stackTop -= 2 * count + 1;
+                push(vm, OBJ_VAL(map));
+                break;
+            }
+
+            case OP_INDEX_GET: {
+                Value index = pop(vm);
+                Value obj = pop(vm);
+
+                if (IS_LIST(obj)) {
+                    if (!IS_NUMBER(index)) {
+                        runtimeError(vm, "List index must be a number.");
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    ObjList* list = AS_LIST(obj);
+                    int i = (int)AS_NUMBER(index);
+                    if (i < 0) i += list->count;
+                    if (i < 0 || i >= list->count) {
+                        runtimeError(vm, "List index %d out of range (length %d).", i, list->count);
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    push(vm, list->items[i]);
+                } else if (IS_MAP(obj)) {
+                    if (!IS_STRING(index)) {
+                        runtimeError(vm, "Map key must be a string.");
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    ObjMap* map = AS_MAP(obj);
+                    Value value;
+                    if (tableGet(&map->table, AS_STRING(index), &value)) {
+                        push(vm, value);
+                    } else {
+                        push(vm, NIL_VAL);
+                    }
+                } else if (IS_STRING(obj)) {
+                    if (!IS_NUMBER(index)) {
+                        runtimeError(vm, "String index must be a number.");
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    ObjString* str = AS_STRING(obj);
+                    int i = (int)AS_NUMBER(index);
+                    if (i < 0) i += str->length;
+                    if (i < 0 || i >= str->length) {
+                        runtimeError(vm, "String index out of range.");
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    push(vm, OBJ_VAL(copyString(vm, &str->chars[i], 1)));
+                } else {
+                    runtimeError(vm, "Only lists, maps, and strings support indexing.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                break;
+            }
+
+            case OP_INDEX_SET: {
+                Value value = pop(vm);
+                Value index = pop(vm);
+                Value obj = pop(vm);
+
+                if (IS_LIST(obj)) {
+                    if (!IS_NUMBER(index)) {
+                        runtimeError(vm, "List index must be a number.");
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    ObjList* list = AS_LIST(obj);
+                    int i = (int)AS_NUMBER(index);
+                    if (i < 0) i += list->count;
+                    if (i < 0 || i >= list->count) {
+                        runtimeError(vm, "List index out of range.");
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    list->items[i] = value;
+                    push(vm, value);
+                } else if (IS_MAP(obj)) {
+                    if (!IS_STRING(index)) {
+                        runtimeError(vm, "Map key must be a string.");
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                    tableSet(&AS_MAP(obj)->table, AS_STRING(index), value);
+                    push(vm, value);
+                } else {
+                    runtimeError(vm, "Only lists and maps support index assignment.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                break;
+            }
+
+            case OP_GET_PROPERTY: {
+                Value obj = peek(vm, 0);
+                ObjString* name = READ_STRING();
+
+                if (IS_MAP(obj)) {
+                    Value value;
+                    if (tableGet(&AS_MAP(obj)->table, name, &value)) {
+                        pop(vm); // pop the map
+                        push(vm, value);
+                    } else {
+                        pop(vm);
+                        push(vm, NIL_VAL);
+                    }
+                } else if (IS_LIST(obj)) {
+                    // List properties
+                    ObjList* list = AS_LIST(obj);
+                    if (name->length == 6 && memcmp(name->chars, "length", 6) == 0) {
+                        pop(vm);
+                        push(vm, NUMBER_VAL(list->count));
+                    } else {
+                        runtimeError(vm, "List has no property '%s'.", name->chars);
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                } else if (IS_STRING(obj)) {
+                    ObjString* str = AS_STRING(obj);
+                    if (name->length == 6 && memcmp(name->chars, "length", 6) == 0) {
+                        pop(vm);
+                        push(vm, NUMBER_VAL(str->length));
+                    } else {
+                        runtimeError(vm, "String has no property '%s'.", name->chars);
+                        return INTERPRET_RUNTIME_ERROR;
+                    }
+                } else {
+                    runtimeError(vm, "Only maps, lists, and strings have properties.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                break;
+            }
+
+            case OP_SET_PROPERTY: {
+                Value value = peek(vm, 0);
+                Value obj = peek(vm, 1);
+                ObjString* name = READ_STRING();
+
+                if (!IS_MAP(obj)) {
+                    runtimeError(vm, "Only maps support property assignment.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+
+                tableSet(&AS_MAP(obj)->table, name, value);
+                // Leave the assigned value on the stack
+                Value assignedValue = pop(vm);
+                pop(vm); // pop the map
+                push(vm, assignedValue);
+                break;
+            }
+
+            case OP_ALLOW: {
+                uint8_t permType = READ_BYTE();
+                ObjString* target = READ_STRING();
+                addPermission(&vm->permissions, (PermissionType)permType,
+                              target->chars, target->length);
+                break;
+            }
+
+            case OP_PUSH_HANDLER: {
+                uint16_t offset = READ_SHORT();
+                if (vm->handlerCount >= HANDLER_MAX) {
+                    runtimeError(vm, "Too many nested error handlers.");
+                    return INTERPRET_RUNTIME_ERROR;
+                }
+                ErrorHandler* handler = &vm->handlers[vm->handlerCount++];
+                handler->handlerIP = frame->ip + offset;
+                handler->frameCount = vm->frameCount;
+                handler->stackTop = vm->stackTop;
+                break;
+            }
+
+            case OP_POP_HANDLER:
+                if (vm->handlerCount > 0) {
+                    vm->handlerCount--;
+                }
+                break;
+
+            case OP_THROW:
+                // Value to throw is on top of stack
+                // (Future: implement throw statement)
+                break;
+
+            // Unused but defined opcodes
+            case OP_EXEC:
+            case OP_PARALLEL_BEGIN:
+            case OP_PARALLEL_TASK:
+            case OP_PARALLEL_END:
+            case OP_CHECK_PERMISSION:
+            case OP_GET_ITERATOR:
+            case OP_ITERATOR_NEXT:
+                runtimeError(vm, "Feature not yet implemented.");
+                return INTERPRET_RUNTIME_ERROR;
+        }
+    }
+
+#undef READ_BYTE
+#undef READ_SHORT
+#undef READ_CONSTANT
+#undef READ_STRING
+#undef BINARY_OP
+}
+
+// ---- Public API ----
+
+InterpretResult interpret(VM* vm, const char* source) {
+    ObjFunction* function = compile(vm, source);
+    if (function == NULL) return INTERPRET_COMPILE_ERROR;
+
+    push(vm, OBJ_VAL(function));
+    ObjClosure* closure = newClosure(vm, function);
+    pop(vm);
+    push(vm, OBJ_VAL(closure));
+    callClosure(vm, closure, 0);
+
+    return run(vm);
+}

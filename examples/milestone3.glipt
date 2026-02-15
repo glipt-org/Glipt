@@ -1,0 +1,64 @@
+# Milestone 3: Glipt-specific features test
+
+# --- Permissions ---
+allow exec "echo*"
+allow exec "true"
+allow exec "false"
+allow read "*"
+allow write "/tmp/*"
+allow env "*"
+
+# --- Process Execution with permissions ---
+result = exec("echo Hello from Glipt")
+print(result["output"])
+
+result2 = exec("true")
+print("exit code: " + str(result2["exitCode"]))
+
+# --- JSON ---
+json_str = '{"name": "glipt", "version": 1, "active": true}'
+data = parse_json(json_str)
+print(data["name"])
+print(data["version"])
+print(data["active"])
+
+# Serialize back to JSON
+list_data = [1, 2, 3]
+print(to_json(list_data))
+
+# --- String Functions ---
+parts = split("hello-world-foo", "-")
+print(len(parts))
+print(parts[0])
+print(parts[2])
+
+print(trim("  hello  "))
+print(upper("hello"))
+print(lower("WORLD"))
+print(replace("hello world", "world", "glipt"))
+print(starts_with("hello", "hel"))
+print(ends_with("hello", "llo"))
+
+# --- Type Conversion ---
+print(num("42") + 8)
+
+# --- List Functions ---
+nums = [3, 1, 4, 1, 5]
+sort(nums)
+print(join(nums, ","))
+
+# --- Environment ---
+home = env("HOME")
+print(type(home))
+
+# --- File I/O ---
+write("/tmp/glipt_test.txt", "hello from glipt")
+content = read("/tmp/glipt_test.txt")
+print(content)
+
+# --- Error Handling ---
+on failure {
+    print("caught: " + error["message"])
+}
+exec("false")
+print("after error handler")

@@ -1,0 +1,17 @@
+# Test process execution
+
+# Basic exec
+result = exec("echo Hello from Glipt")
+print(result["output"])
+
+# Capture exit code
+result2 = exec("true")
+print("exit code: " + str(result2["exitCode"]))
+
+# Execute with arguments
+result3 = exec("echo one two three")
+print(result3["output"])
+
+# Use backtick syntax
+date_result = exec("date +%Y")
+print("Year: " + date_result["output"])
