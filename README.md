@@ -474,7 +474,6 @@ stdout: hello
 
 ## Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Implementation details
 - [examples/](examples/) - Example scripts
 
 ## Language Syntax
