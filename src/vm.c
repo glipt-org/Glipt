@@ -8,6 +8,11 @@
 #include "dataformat.h"
 #include "parallel.h"
 
+#include "modules/fs.h"
+#include "modules/proc.h"
+#include "modules/net.h"
+#include "modules/sys.h"
+
 #include <stdarg.h>
 #include <math.h>
 #include <time.h>
@@ -45,22 +50,21 @@ static Value typeNative(VM* vm, int argCount, Value* args) {
 
     Value val = args[0];
     const char* name;
-    switch (val.type) {
-        case VAL_BOOL:   name = "bool"; break;
-        case VAL_NIL:    name = "nil"; break;
-        case VAL_NUMBER: name = "number"; break;
-        case VAL_OBJ:
-            switch (OBJ_TYPE(val)) {
-                case OBJ_STRING:   name = "string"; break;
-                case OBJ_FUNCTION:
-                case OBJ_CLOSURE:
-                case OBJ_NATIVE:   name = "function"; break;
-                case OBJ_LIST:     name = "list"; break;
-                case OBJ_MAP:      name = "map"; break;
-                default:           name = "object"; break;
-            }
-            break;
-        default: name = "unknown"; break;
+    if (IS_BOOL(val))        name = "bool";
+    else if (IS_NIL(val))    name = "nil";
+    else if (IS_NUMBER(val)) name = "number";
+    else if (IS_OBJ(val)) {
+        switch (OBJ_TYPE(val)) {
+            case OBJ_STRING:   name = "string"; break;
+            case OBJ_FUNCTION:
+            case OBJ_CLOSURE:
+            case OBJ_NATIVE:   name = "function"; break;
+            case OBJ_LIST:     name = "list"; break;
+            case OBJ_MAP:      name = "map"; break;
+            default:           name = "object"; break;
+        }
+    } else {
+        name = "unknown";
     }
     return OBJ_VAL(copyString(vm, name, (int)strlen(name)));
 }
@@ -780,6 +784,7 @@ void initVM(VM* vm) {
     vm->handlerCount = 0;
     vm->hasError = false;
     vm->currentError = NIL_VAL;
+    memset(vm->globalIC, 0, sizeof(vm->globalIC));
 
     setCurrentVM(vm);
 
@@ -843,6 +848,12 @@ void initVM(VM* vm) {
 
     // Parallel execution
     defineNative(vm, "parallel_exec", parallelExec, 1);
+
+    // Standard library modules
+    registerFsModule(vm);
+    registerProcModule(vm);
+    registerNetModule(vm);
+    registerSysModule(vm);
 }
 
 void freeVM(VM* vm) {
@@ -860,6 +871,47 @@ void defineNative(VM* vm, const char* name, NativeFn function, int arity) {
     *vm->stackTop++ = OBJ_VAL(newNative(vm, function, name, arity));
     tableSet(&vm->globals, AS_STRING(vm->stack[0]), vm->stack[1]);
     vm->stackTop -= 2;
+}
+
+void defineModuleNative(VM* vm, ObjMap* module, const char* name,
+                        NativeFn function, int arity) {
+    ObjString* nameStr = copyString(vm, name, (int)strlen(name));
+    *vm->stackTop++ = OBJ_VAL(nameStr);
+    *vm->stackTop++ = OBJ_VAL(newNative(vm, function, name, arity));
+    tableSet(&module->table, AS_STRING(vm->stackTop[-2]), vm->stackTop[-1]);
+    vm->stackTop -= 2;
+}
+
+void vmPush(VM* vm, Value value) {
+    if (vm->stackTop >= vm->stack + STACK_MAX) {
+        fprintf(stderr, "Stack overflow.\n");
+        return;
+    }
+    *vm->stackTop = value;
+    vm->stackTop++;
+}
+
+Value vmPop(VM* vm) {
+    vm->stackTop--;
+    return *vm->stackTop;
+}
+
+void vmRaiseError(VM* vm, const char* message, const char* type) {
+    ObjMap* errorMap = newMap(vm);
+    vmPush(vm, OBJ_VAL(errorMap));
+
+    ObjString* msgKey = copyString(vm, "message", 7);
+    ObjString* msgVal = copyString(vm, message, (int)strlen(message));
+    tableSet(&errorMap->table, msgKey, OBJ_VAL(msgVal));
+
+    ObjString* typeKey = copyString(vm, "type", 4);
+    ObjString* typeVal = copyString(vm, type, (int)strlen(type));
+    tableSet(&errorMap->table, typeKey, OBJ_VAL(typeVal));
+
+    vmPop(vm);
+
+    vm->hasError = true;
+    vm->currentError = OBJ_VAL(errorMap);
 }
 
 // ---- Runtime Errors ----
@@ -911,6 +963,12 @@ static void raiseError(VM* vm, const char* message, const char* type) {
 // ---- Stack Operations ----
 
 static inline void push(VM* vm, Value value) {
+    if (vm->stackTop >= vm->stack + STACK_MAX) {
+        fprintf(stderr, "Stack overflow.\n");
+        vm->stackTop = vm->stack;
+        vm->frameCount = 0;
+        return;
+    }
     *vm->stackTop = value;
     vm->stackTop++;
 }
@@ -1027,29 +1085,117 @@ static void concatenate(VM* vm) {
 
 // ---- Execution Loop ----
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wgnu-label-as-value"
+#endif
+
 static InterpretResult run(VM* vm) {
     CallFrame* frame = &vm->frames[vm->frameCount - 1];
 
-#define READ_BYTE() (*frame->ip++)
+    // Cache hot pointers in locals for faster dispatch
+    register uint8_t* ip = frame->ip;
+    register Value* constants = frame->closure->function->chunk.constants.values;
+
+    // Sync cached ip back to frame (needed before runtimeError/callValue)
+#define STORE_FRAME() (frame->ip = ip)
+
+    // Reload cached locals after frame changes (call/return)
+#define LOAD_FRAME() \
+    do { \
+        frame = &vm->frames[vm->frameCount - 1]; \
+        ip = frame->ip; \
+        constants = frame->closure->function->chunk.constants.values; \
+    } while (false)
+
+#define READ_BYTE() (*ip++)
 #define READ_SHORT() \
-    (frame->ip += 2, (uint16_t)((frame->ip[-2] << 8) | frame->ip[-1]))
-#define READ_CONSTANT() (frame->closure->function->chunk.constants.values[READ_BYTE()])
+    (ip += 2, (uint16_t)((ip[-2] << 8) | ip[-1]))
+#define READ_CONSTANT() (constants[READ_BYTE()])
 #define READ_STRING() AS_STRING(READ_CONSTANT())
 #define BINARY_OP(valueType, op) \
     do { \
-        if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) { \
+        if (!IS_NUMBER(vm->stackTop[-1]) || !IS_NUMBER(vm->stackTop[-2])) { \
+            STORE_FRAME(); \
             runtimeError(vm, "Operands must be numbers."); \
             return INTERPRET_RUNTIME_ERROR; \
         } \
-        double b = AS_NUMBER(pop(vm)); \
-        double a = AS_NUMBER(pop(vm)); \
-        push(vm, valueType(a op b)); \
+        double b = AS_NUMBER(vm->stackTop[-1]); \
+        double a = AS_NUMBER(vm->stackTop[-2]); \
+        vm->stackTop--; \
+        vm->stackTop[-1] = valueType(a op b); \
     } while (false)
 
-    for (;;) {
+    // Computed goto dispatch for GCC/Clang (~15-25% faster)
+#if defined(__GNUC__) || defined(__clang__)
+#define USE_COMPUTED_GOTO
+#endif
+
+#ifdef USE_COMPUTED_GOTO
+    static void* dispatch_table[] = {
+        [OP_CONSTANT]      = &&op_CONSTANT,
+        [OP_NIL]           = &&op_NIL,
+        [OP_TRUE]          = &&op_TRUE,
+        [OP_FALSE]         = &&op_FALSE,
+        [OP_ADD]           = &&op_ADD,
+        [OP_SUBTRACT]      = &&op_SUBTRACT,
+        [OP_MULTIPLY]      = &&op_MULTIPLY,
+        [OP_DIVIDE]        = &&op_DIVIDE,
+        [OP_MODULO]        = &&op_MODULO,
+        [OP_NEGATE]        = &&op_NEGATE,
+        [OP_EQUAL]         = &&op_EQUAL,
+        [OP_NOT_EQUAL]     = &&op_NOT_EQUAL,
+        [OP_GREATER]       = &&op_GREATER,
+        [OP_GREATER_EQUAL] = &&op_GREATER_EQUAL,
+        [OP_LESS]          = &&op_LESS,
+        [OP_LESS_EQUAL]    = &&op_LESS_EQUAL,
+        [OP_NOT]           = &&op_NOT,
+        [OP_GET_LOCAL]     = &&op_GET_LOCAL,
+        [OP_SET_LOCAL]     = &&op_SET_LOCAL,
+        [OP_GET_GLOBAL]    = &&op_GET_GLOBAL,
+        [OP_SET_GLOBAL]    = &&op_SET_GLOBAL,
+        [OP_DEFINE_GLOBAL] = &&op_DEFINE_GLOBAL,
+        [OP_GET_UPVALUE]   = &&op_GET_UPVALUE,
+        [OP_SET_UPVALUE]   = &&op_SET_UPVALUE,
+        [OP_JUMP]          = &&op_JUMP,
+        [OP_JUMP_IF_FALSE] = &&op_JUMP_IF_FALSE,
+        [OP_LOOP]          = &&op_LOOP,
+        [OP_CALL]          = &&op_CALL,
+        [OP_CLOSURE]       = &&op_CLOSURE,
+        [OP_RETURN]        = &&op_RETURN,
+        [OP_CLOSE_UPVALUE] = &&op_CLOSE_UPVALUE,
+        [OP_BUILD_LIST]    = &&op_BUILD_LIST,
+        [OP_BUILD_MAP]     = &&op_BUILD_MAP,
+        [OP_INDEX_GET]     = &&op_INDEX_GET,
+        [OP_INDEX_SET]     = &&op_INDEX_SET,
+        [OP_GET_PROPERTY]  = &&op_GET_PROPERTY,
+        [OP_SET_PROPERTY]  = &&op_SET_PROPERTY,
+        [OP_PRINT]         = &&op_PRINT,
+        [OP_POP]           = &&op_POP,
+        [OP_ALLOW]         = &&op_ALLOW,
+        [OP_PUSH_HANDLER]  = &&op_PUSH_HANDLER,
+        [OP_POP_HANDLER]   = &&op_POP_HANDLER,
+        [OP_THROW]         = &&op_THROW,
+    };
+
+    #define DISPATCH() goto *dispatch_table[READ_BYTE()]
+    #define CASE(name) op_##name
+    #define NEXT() DISPATCH()
+    #define LOOP_START DISPATCH();
+    #define LOOP_END
+#else
+    #define DISPATCH()
+    #define CASE(name) case OP_##name
+    #define NEXT() break
+    #define LOOP_START for (;;) { uint8_t instruction; switch (instruction = READ_BYTE()) {
+    #define LOOP_END }}
+#endif
+
+    LOOP_START
 
 #ifdef DEBUG_TRACE
         // Print stack
+        STORE_FRAME();
         printf("          ");
         for (Value* slot = vm->stack; slot < vm->stackTop; slot++) {
             printf("[ ");
@@ -1058,475 +1204,508 @@ static InterpretResult run(VM* vm) {
         }
         printf("\n");
         disassembleInstruction(&frame->closure->function->chunk,
-            (int)(frame->ip - frame->closure->function->chunk.code));
+            (int)(ip - frame->closure->function->chunk.code));
 #endif
 
-        uint8_t instruction;
-        switch (instruction = READ_BYTE()) {
-            case OP_CONSTANT: {
-                Value constant = READ_CONSTANT();
-                push(vm, constant);
-                break;
-            }
-
-            case OP_NIL:   push(vm, NIL_VAL); break;
-            case OP_TRUE:  push(vm, BOOL_VAL(true)); break;
-            case OP_FALSE: push(vm, BOOL_VAL(false)); break;
-
-            case OP_ADD: {
-                if (IS_STRING(peek(vm, 0)) && IS_STRING(peek(vm, 1))) {
-                    concatenate(vm);
-                } else if (IS_NUMBER(peek(vm, 0)) && IS_NUMBER(peek(vm, 1))) {
-                    double b = AS_NUMBER(pop(vm));
-                    double a = AS_NUMBER(pop(vm));
-                    push(vm, NUMBER_VAL(a + b));
-                } else {
-                    runtimeError(vm, "Operands must be two numbers or two strings.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                break;
-            }
-
-            case OP_SUBTRACT: BINARY_OP(NUMBER_VAL, -); break;
-            case OP_MULTIPLY: BINARY_OP(NUMBER_VAL, *); break;
-            case OP_DIVIDE: {
-                if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) {
-                    runtimeError(vm, "Operands must be numbers.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                double b = AS_NUMBER(pop(vm));
-                if (b == 0) {
-                    runtimeError(vm, "Division by zero.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                double a = AS_NUMBER(pop(vm));
-                push(vm, NUMBER_VAL(a / b));
-                break;
-            }
-            case OP_MODULO: {
-                if (!IS_NUMBER(peek(vm, 0)) || !IS_NUMBER(peek(vm, 1))) {
-                    runtimeError(vm, "Operands must be numbers.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                double b = AS_NUMBER(pop(vm));
-                double a = AS_NUMBER(pop(vm));
-                push(vm, NUMBER_VAL(fmod(a, b)));
-                break;
-            }
-
-            case OP_NEGATE: {
-                if (!IS_NUMBER(peek(vm, 0))) {
-                    runtimeError(vm, "Operand must be a number.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                push(vm, NUMBER_VAL(-AS_NUMBER(pop(vm))));
-                break;
-            }
-
-            case OP_EQUAL: {
-                Value b = pop(vm);
-                Value a = pop(vm);
-                push(vm, BOOL_VAL(valuesEqual(a, b)));
-                break;
-            }
-            case OP_NOT_EQUAL: {
-                Value b = pop(vm);
-                Value a = pop(vm);
-                push(vm, BOOL_VAL(!valuesEqual(a, b)));
-                break;
-            }
-            case OP_GREATER:       BINARY_OP(BOOL_VAL, >); break;
-            case OP_GREATER_EQUAL: BINARY_OP(BOOL_VAL, >=); break;
-            case OP_LESS:          BINARY_OP(BOOL_VAL, <); break;
-            case OP_LESS_EQUAL:    BINARY_OP(BOOL_VAL, <=); break;
-
-            case OP_NOT:
-                push(vm, BOOL_VAL(isFalsey(pop(vm))));
-                break;
-
-            case OP_GET_LOCAL: {
-                uint8_t slot = READ_BYTE();
-                push(vm, frame->slots[slot]);
-                break;
-            }
-            case OP_SET_LOCAL: {
-                uint8_t slot = READ_BYTE();
-                frame->slots[slot] = peek(vm, 0);
-                break;
-            }
-
-            case OP_GET_GLOBAL: {
-                ObjString* name = READ_STRING();
-                Value value;
-                if (!tableGet(&vm->globals, name, &value)) {
-                    runtimeError(vm, "Undefined variable '%s'.", name->chars);
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                push(vm, value);
-                break;
-            }
-            case OP_SET_GLOBAL: {
-                ObjString* name = READ_STRING();
-                if (tableSet(&vm->globals, name, peek(vm, 0))) {
-                    // New key means variable didn't exist, define it
-                    // (Glipt allows implicit globals)
-                }
-                break;
-            }
-            case OP_DEFINE_GLOBAL: {
-                ObjString* name = READ_STRING();
-                tableSet(&vm->globals, name, peek(vm, 0));
-                pop(vm);
-                break;
-            }
-
-            case OP_GET_UPVALUE: {
-                uint8_t slot = READ_BYTE();
-                push(vm, *frame->closure->upvalues[slot]->location);
-                break;
-            }
-            case OP_SET_UPVALUE: {
-                uint8_t slot = READ_BYTE();
-                *frame->closure->upvalues[slot]->location = peek(vm, 0);
-                break;
-            }
-
-            case OP_JUMP: {
-                uint16_t offset = READ_SHORT();
-                frame->ip += offset;
-                break;
-            }
-            case OP_JUMP_IF_FALSE: {
-                uint16_t offset = READ_SHORT();
-                if (isFalsey(peek(vm, 0))) frame->ip += offset;
-                break;
-            }
-            case OP_LOOP: {
-                uint16_t offset = READ_SHORT();
-                frame->ip -= offset;
-                break;
-            }
-
-            case OP_CALL: {
-                int argCount = READ_BYTE();
-                if (!callValue(vm, peek(vm, argCount), argCount)) {
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                frame = &vm->frames[vm->frameCount - 1];
-
-                // Check for raised errors (e.g. from exec, permission denied)
-                if (vm->hasError) {
-                    if (vm->handlerCount > 0) {
-                        ErrorHandler* handler = &vm->handlers[vm->handlerCount - 1];
-                        // Unwind to handler state
-                        vm->frameCount = handler->frameCount;
-                        frame = &vm->frames[vm->frameCount - 1];
-                        vm->stackTop = handler->stackTop;
-                        // Push error value for the handler to use
-                        push(vm, vm->currentError);
-                        frame->ip = handler->handlerIP;
-                        vm->hasError = false;
-                        vm->currentError = NIL_VAL;
-                    } else {
-                        // No handler - print error and terminate
-                        if (IS_OBJ(vm->currentError) && IS_MAP(vm->currentError)) {
-                            ObjMap* errMap = AS_MAP(vm->currentError);
-                            Value msgVal;
-                            ObjString* msgKey = copyString(vm, "message", 7);
-                            if (tableGet(&errMap->table, msgKey, &msgVal) && IS_STRING(msgVal)) {
-                                runtimeError(vm, "%s", AS_CSTRING(msgVal));
-                            } else {
-                                runtimeError(vm, "Runtime error.");
-                            }
-                        } else {
-                            runtimeError(vm, "Runtime error.");
-                        }
-                        vm->hasError = false;
-                        vm->currentError = NIL_VAL;
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                }
-                break;
-            }
-
-            case OP_CLOSURE: {
-                ObjFunction* function = AS_FUNCTION(READ_CONSTANT());
-                ObjClosure* closure = newClosure(vm, function);
-                push(vm, OBJ_VAL(closure));
-                for (int i = 0; i < closure->upvalueCount; i++) {
-                    uint8_t isLocal = READ_BYTE();
-                    uint8_t index = READ_BYTE();
-                    if (isLocal) {
-                        closure->upvalues[i] = captureUpvalue(vm, frame->slots + index);
-                    } else {
-                        closure->upvalues[i] = frame->closure->upvalues[index];
-                    }
-                }
-                break;
-            }
-
-            case OP_CLOSE_UPVALUE:
-                closeUpvalues(vm, vm->stackTop - 1);
-                pop(vm);
-                break;
-
-            case OP_RETURN: {
-                Value result = pop(vm);
-                closeUpvalues(vm, frame->slots);
-                vm->frameCount--;
-                if (vm->frameCount == 0) {
-                    pop(vm);
-                    return INTERPRET_OK;
-                }
-                vm->stackTop = frame->slots;
-                push(vm, result);
-                frame = &vm->frames[vm->frameCount - 1];
-                break;
-            }
-
-            case OP_PRINT: {
-                printValue(pop(vm));
-                printf("\n");
-                break;
-            }
-
-            case OP_POP:
-                pop(vm);
-                break;
-
-            case OP_BUILD_LIST: {
-                int count = READ_BYTE();
-                ObjList* list = newList(vm);
-                // Items are on the stack in order, but we need to
-                // get them from bottom to top
-                // The items are: stackTop[-count] ... stackTop[-1]
-                // First, push the list to protect it from GC
-                push(vm, OBJ_VAL(list));
-
-                for (int i = count; i > 0; i--) {
-                    // peek past the list we just pushed
-                    listAppend(vm, list, vm->stackTop[-1 - i]);
-                }
-
-                // Remove the items and the list from the stack
-                // Put the list back
-                vm->stackTop -= count + 1;
-                push(vm, OBJ_VAL(list));
-                break;
-            }
-
-            case OP_BUILD_MAP: {
-                int count = READ_BYTE(); // number of key-value pairs
-                ObjMap* map = newMap(vm);
-                push(vm, OBJ_VAL(map)); // GC protection
-
-                // Pairs are on stack: key1, val1, key2, val2, ...
-                // stackTop[-1] = map, then pairs below
-                for (int i = count; i > 0; i--) {
-                    Value val = vm->stackTop[-1 - (2 * i - 1)]; // value
-                    Value key = vm->stackTop[-1 - (2 * i)];     // key
-                    if (!IS_STRING(key)) {
-                        runtimeError(vm, "Map key must be a string.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    tableSet(&map->table, AS_STRING(key), val);
-                }
-
-                vm->stackTop -= 2 * count + 1;
-                push(vm, OBJ_VAL(map));
-                break;
-            }
-
-            case OP_INDEX_GET: {
-                Value index = pop(vm);
-                Value obj = pop(vm);
-
-                if (IS_LIST(obj)) {
-                    if (!IS_NUMBER(index)) {
-                        runtimeError(vm, "List index must be a number.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    ObjList* list = AS_LIST(obj);
-                    int i = (int)AS_NUMBER(index);
-                    if (i < 0) i += list->count;
-                    if (i < 0 || i >= list->count) {
-                        runtimeError(vm, "List index %d out of range (length %d).", i, list->count);
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    push(vm, list->items[i]);
-                } else if (IS_MAP(obj)) {
-                    if (!IS_STRING(index)) {
-                        runtimeError(vm, "Map key must be a string.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    ObjMap* map = AS_MAP(obj);
-                    Value value;
-                    if (tableGet(&map->table, AS_STRING(index), &value)) {
-                        push(vm, value);
-                    } else {
-                        push(vm, NIL_VAL);
-                    }
-                } else if (IS_STRING(obj)) {
-                    if (!IS_NUMBER(index)) {
-                        runtimeError(vm, "String index must be a number.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    ObjString* str = AS_STRING(obj);
-                    int i = (int)AS_NUMBER(index);
-                    if (i < 0) i += str->length;
-                    if (i < 0 || i >= str->length) {
-                        runtimeError(vm, "String index out of range.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    push(vm, OBJ_VAL(copyString(vm, &str->chars[i], 1)));
-                } else {
-                    runtimeError(vm, "Only lists, maps, and strings support indexing.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                break;
-            }
-
-            case OP_INDEX_SET: {
-                Value value = pop(vm);
-                Value index = pop(vm);
-                Value obj = pop(vm);
-
-                if (IS_LIST(obj)) {
-                    if (!IS_NUMBER(index)) {
-                        runtimeError(vm, "List index must be a number.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    ObjList* list = AS_LIST(obj);
-                    int i = (int)AS_NUMBER(index);
-                    if (i < 0) i += list->count;
-                    if (i < 0 || i >= list->count) {
-                        runtimeError(vm, "List index out of range.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    list->items[i] = value;
-                    push(vm, value);
-                } else if (IS_MAP(obj)) {
-                    if (!IS_STRING(index)) {
-                        runtimeError(vm, "Map key must be a string.");
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                    tableSet(&AS_MAP(obj)->table, AS_STRING(index), value);
-                    push(vm, value);
-                } else {
-                    runtimeError(vm, "Only lists and maps support index assignment.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                break;
-            }
-
-            case OP_GET_PROPERTY: {
-                Value obj = peek(vm, 0);
-                ObjString* name = READ_STRING();
-
-                if (IS_MAP(obj)) {
-                    Value value;
-                    if (tableGet(&AS_MAP(obj)->table, name, &value)) {
-                        pop(vm); // pop the map
-                        push(vm, value);
-                    } else {
-                        pop(vm);
-                        push(vm, NIL_VAL);
-                    }
-                } else if (IS_LIST(obj)) {
-                    // List properties
-                    ObjList* list = AS_LIST(obj);
-                    if (name->length == 6 && memcmp(name->chars, "length", 6) == 0) {
-                        pop(vm);
-                        push(vm, NUMBER_VAL(list->count));
-                    } else {
-                        runtimeError(vm, "List has no property '%s'.", name->chars);
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                } else if (IS_STRING(obj)) {
-                    ObjString* str = AS_STRING(obj);
-                    if (name->length == 6 && memcmp(name->chars, "length", 6) == 0) {
-                        pop(vm);
-                        push(vm, NUMBER_VAL(str->length));
-                    } else {
-                        runtimeError(vm, "String has no property '%s'.", name->chars);
-                        return INTERPRET_RUNTIME_ERROR;
-                    }
-                } else {
-                    runtimeError(vm, "Only maps, lists, and strings have properties.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                break;
-            }
-
-            case OP_SET_PROPERTY: {
-                Value value = peek(vm, 0);
-                Value obj = peek(vm, 1);
-                ObjString* name = READ_STRING();
-
-                if (!IS_MAP(obj)) {
-                    runtimeError(vm, "Only maps support property assignment.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-
-                tableSet(&AS_MAP(obj)->table, name, value);
-                // Leave the assigned value on the stack
-                Value assignedValue = pop(vm);
-                pop(vm); // pop the map
-                push(vm, assignedValue);
-                break;
-            }
-
-            case OP_ALLOW: {
-                uint8_t permType = READ_BYTE();
-                ObjString* target = READ_STRING();
-                addPermission(&vm->permissions, (PermissionType)permType,
-                              target->chars, target->length);
-                break;
-            }
-
-            case OP_PUSH_HANDLER: {
-                uint16_t offset = READ_SHORT();
-                if (vm->handlerCount >= HANDLER_MAX) {
-                    runtimeError(vm, "Too many nested error handlers.");
-                    return INTERPRET_RUNTIME_ERROR;
-                }
-                ErrorHandler* handler = &vm->handlers[vm->handlerCount++];
-                handler->handlerIP = frame->ip + offset;
-                handler->frameCount = vm->frameCount;
-                handler->stackTop = vm->stackTop;
-                break;
-            }
-
-            case OP_POP_HANDLER:
-                if (vm->handlerCount > 0) {
-                    vm->handlerCount--;
-                }
-                break;
-
-            case OP_THROW:
-                // Value to throw is on top of stack
-                // (Future: implement throw statement)
-                break;
-
-            // Unused but defined opcodes
-            case OP_EXEC:
-            case OP_PARALLEL_BEGIN:
-            case OP_PARALLEL_TASK:
-            case OP_PARALLEL_END:
-            case OP_CHECK_PERMISSION:
-            case OP_GET_ITERATOR:
-            case OP_ITERATOR_NEXT:
-                runtimeError(vm, "Feature not yet implemented.");
-                return INTERPRET_RUNTIME_ERROR;
-        }
+    CASE(CONSTANT): {
+        *vm->stackTop++ = READ_CONSTANT();
+        NEXT();
     }
 
+    CASE(NIL):   *vm->stackTop++ = NIL_VAL; NEXT();
+    CASE(TRUE):  *vm->stackTop++ = TRUE_VAL; NEXT();
+    CASE(FALSE): *vm->stackTop++ = FALSE_VAL; NEXT();
+
+    CASE(ADD): {
+        if (IS_NUMBER(vm->stackTop[-1]) && IS_NUMBER(vm->stackTop[-2])) {
+            double b = AS_NUMBER(vm->stackTop[-1]);
+            double a = AS_NUMBER(vm->stackTop[-2]);
+            vm->stackTop--;
+            vm->stackTop[-1] = NUMBER_VAL(a + b);
+        } else if (IS_STRING(vm->stackTop[-1]) && IS_STRING(vm->stackTop[-2])) {
+            concatenate(vm);
+        } else {
+            STORE_FRAME();
+            runtimeError(vm, "Operands must be two numbers or two strings.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        NEXT();
+    }
+
+    CASE(SUBTRACT): BINARY_OP(NUMBER_VAL, -); NEXT();
+    CASE(MULTIPLY): BINARY_OP(NUMBER_VAL, *); NEXT();
+    CASE(DIVIDE): {
+        if (!IS_NUMBER(vm->stackTop[-1]) || !IS_NUMBER(vm->stackTop[-2])) {
+            STORE_FRAME();
+            runtimeError(vm, "Operands must be numbers.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        double b = AS_NUMBER(vm->stackTop[-1]);
+        if (b == 0) {
+            STORE_FRAME();
+            runtimeError(vm, "Division by zero.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        double a = AS_NUMBER(vm->stackTop[-2]);
+        vm->stackTop--;
+        vm->stackTop[-1] = NUMBER_VAL(a / b);
+        NEXT();
+    }
+    CASE(MODULO): {
+        if (!IS_NUMBER(vm->stackTop[-1]) || !IS_NUMBER(vm->stackTop[-2])) {
+            STORE_FRAME();
+            runtimeError(vm, "Operands must be numbers.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        double b = AS_NUMBER(vm->stackTop[-1]);
+        double a = AS_NUMBER(vm->stackTop[-2]);
+        vm->stackTop--;
+        vm->stackTop[-1] = NUMBER_VAL(fmod(a, b));
+        NEXT();
+    }
+
+    CASE(NEGATE): {
+        if (!IS_NUMBER(vm->stackTop[-1])) {
+            STORE_FRAME();
+            runtimeError(vm, "Operand must be a number.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        vm->stackTop[-1] = NUMBER_VAL(-AS_NUMBER(vm->stackTop[-1]));
+        NEXT();
+    }
+
+    CASE(EQUAL): {
+        Value b = vm->stackTop[-1];
+        Value a = vm->stackTop[-2];
+        vm->stackTop--;
+        vm->stackTop[-1] = BOOL_VAL(valuesEqual(a, b));
+        NEXT();
+    }
+    CASE(NOT_EQUAL): {
+        Value b = vm->stackTop[-1];
+        Value a = vm->stackTop[-2];
+        vm->stackTop--;
+        vm->stackTop[-1] = BOOL_VAL(!valuesEqual(a, b));
+        NEXT();
+    }
+    CASE(GREATER):       BINARY_OP(BOOL_VAL, >); NEXT();
+    CASE(GREATER_EQUAL): BINARY_OP(BOOL_VAL, >=); NEXT();
+    CASE(LESS):          BINARY_OP(BOOL_VAL, <); NEXT();
+    CASE(LESS_EQUAL):    BINARY_OP(BOOL_VAL, <=); NEXT();
+
+    CASE(NOT):
+        vm->stackTop[-1] = BOOL_VAL(isFalsey(vm->stackTop[-1]));
+        NEXT();
+
+    CASE(GET_LOCAL): {
+        uint8_t slot = READ_BYTE();
+        *vm->stackTop++ = frame->slots[slot];
+        NEXT();
+    }
+    CASE(SET_LOCAL): {
+        uint8_t slot = READ_BYTE();
+        frame->slots[slot] = vm->stackTop[-1];
+        NEXT();
+    }
+
+    CASE(GET_GLOBAL): {
+        ObjString* name = READ_STRING();
+        uint32_t slot = name->hash & (GLOBAL_IC_SIZE - 1);
+        GlobalICSlot* ic = &vm->globalIC[slot];
+        if (LIKELY(ic->key == name && ic->tableCapacity == vm->globals.capacity)) {
+            *vm->stackTop++ = ic->entry->value;
+        } else {
+            Entry* entry;
+            if (UNLIKELY(!tableGetEntry(&vm->globals, name, &entry))) {
+                STORE_FRAME();
+                runtimeError(vm, "Undefined variable '%s'.", name->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            ic->key = name;
+            ic->entry = entry;
+            ic->tableCapacity = vm->globals.capacity;
+            *vm->stackTop++ = entry->value;
+        }
+        NEXT();
+    }
+    CASE(SET_GLOBAL): {
+        ObjString* name = READ_STRING();
+        Value value = vm->stackTop[-1];
+        uint32_t slot = name->hash & (GLOBAL_IC_SIZE - 1);
+        GlobalICSlot* ic = &vm->globalIC[slot];
+        if (LIKELY(ic->key == name && ic->tableCapacity == vm->globals.capacity)) {
+            ic->entry->value = value;
+        } else {
+            tableSet(&vm->globals, name, value);
+            Entry* entry;
+            tableGetEntry(&vm->globals, name, &entry);
+            ic->key = name;
+            ic->entry = entry;
+            ic->tableCapacity = vm->globals.capacity;
+        }
+        NEXT();
+    }
+    CASE(DEFINE_GLOBAL): {
+        ObjString* name = READ_STRING();
+        tableSet(&vm->globals, name, vm->stackTop[-1]);
+        vm->stackTop--;
+        NEXT();
+    }
+
+    CASE(GET_UPVALUE): {
+        uint8_t slot = READ_BYTE();
+        *vm->stackTop++ = *frame->closure->upvalues[slot]->location;
+        NEXT();
+    }
+    CASE(SET_UPVALUE): {
+        uint8_t slot = READ_BYTE();
+        *frame->closure->upvalues[slot]->location = vm->stackTop[-1];
+        NEXT();
+    }
+
+    CASE(JUMP): {
+        uint16_t offset = READ_SHORT();
+        ip += offset;
+        NEXT();
+    }
+    CASE(JUMP_IF_FALSE): {
+        uint16_t offset = READ_SHORT();
+        if (isFalsey(vm->stackTop[-1])) ip += offset;
+        NEXT();
+    }
+    CASE(LOOP): {
+        uint16_t offset = READ_SHORT();
+        ip -= offset;
+        NEXT();
+    }
+
+    CASE(CALL): {
+        int argCount = READ_BYTE();
+        STORE_FRAME();
+        if (!callValue(vm, peek(vm, argCount), argCount)) {
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        LOAD_FRAME();
+
+        // Check for raised errors (e.g. from exec, permission denied)
+        if (vm->hasError) {
+            if (vm->handlerCount > 0) {
+                ErrorHandler* handler = &vm->handlers[vm->handlerCount - 1];
+                // Unwind to handler state
+                vm->frameCount = handler->frameCount;
+                LOAD_FRAME();
+                vm->stackTop = handler->stackTop;
+                // Push error value for the handler to use
+                push(vm, vm->currentError);
+                ip = handler->handlerIP;
+                vm->hasError = false;
+                vm->currentError = NIL_VAL;
+            } else {
+                // No handler - print error and terminate
+                if (IS_OBJ(vm->currentError) && IS_MAP(vm->currentError)) {
+                    ObjMap* errMap = AS_MAP(vm->currentError);
+                    Value msgVal;
+                    ObjString* msgKey = copyString(vm, "message", 7);
+                    if (tableGet(&errMap->table, msgKey, &msgVal) && IS_STRING(msgVal)) {
+                        STORE_FRAME();
+                        runtimeError(vm, "%s", AS_CSTRING(msgVal));
+                    } else {
+                        STORE_FRAME();
+                        runtimeError(vm, "Runtime error.");
+                    }
+                } else {
+                    STORE_FRAME();
+                    runtimeError(vm, "Runtime error.");
+                }
+                vm->hasError = false;
+                vm->currentError = NIL_VAL;
+                return INTERPRET_RUNTIME_ERROR;
+            }
+        }
+        NEXT();
+    }
+
+    CASE(CLOSURE): {
+        ObjFunction* function = AS_FUNCTION(READ_CONSTANT());
+        ObjClosure* closure = newClosure(vm, function);
+        push(vm, OBJ_VAL(closure));
+        for (int i = 0; i < closure->upvalueCount; i++) {
+            uint8_t isLocal = READ_BYTE();
+            uint8_t index = READ_BYTE();
+            if (isLocal) {
+                closure->upvalues[i] = captureUpvalue(vm, frame->slots + index);
+            } else {
+                closure->upvalues[i] = frame->closure->upvalues[index];
+            }
+        }
+        NEXT();
+    }
+
+    CASE(CLOSE_UPVALUE):
+        closeUpvalues(vm, vm->stackTop - 1);
+        pop(vm);
+        NEXT();
+
+    CASE(RETURN): {
+        Value result = pop(vm);
+        closeUpvalues(vm, frame->slots);
+        vm->frameCount--;
+        if (vm->frameCount == 0) {
+            pop(vm);
+            return INTERPRET_OK;
+        }
+        vm->stackTop = frame->slots;
+        push(vm, result);
+        LOAD_FRAME();
+        NEXT();
+    }
+
+    CASE(PRINT): {
+        printValue(*(--vm->stackTop));
+        printf("\n");
+        NEXT();
+    }
+
+    CASE(POP):
+        vm->stackTop--;
+        NEXT();
+
+    CASE(BUILD_LIST): {
+        int count = READ_BYTE();
+        ObjList* list = newList(vm);
+        push(vm, OBJ_VAL(list));
+
+        for (int i = count; i > 0; i--) {
+            listAppend(vm, list, vm->stackTop[-1 - i]);
+        }
+
+        vm->stackTop -= count + 1;
+        push(vm, OBJ_VAL(list));
+        NEXT();
+    }
+
+    CASE(BUILD_MAP): {
+        int count = READ_BYTE();
+        ObjMap* map = newMap(vm);
+        push(vm, OBJ_VAL(map));
+
+        for (int i = count; i > 0; i--) {
+            Value val = vm->stackTop[-1 - (2 * i - 1)];
+            Value key = vm->stackTop[-1 - (2 * i)];
+            if (!IS_STRING(key)) {
+                STORE_FRAME();
+                runtimeError(vm, "Map key must be a string.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            tableSet(&map->table, AS_STRING(key), val);
+        }
+
+        vm->stackTop -= 2 * count + 1;
+        push(vm, OBJ_VAL(map));
+        NEXT();
+    }
+
+    CASE(INDEX_GET): {
+        Value index = pop(vm);
+        Value obj = pop(vm);
+
+        if (IS_LIST(obj)) {
+            if (!IS_NUMBER(index)) {
+                STORE_FRAME();
+                runtimeError(vm, "List index must be a number.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            ObjList* list = AS_LIST(obj);
+            int i = (int)AS_NUMBER(index);
+            if (i < 0) i += list->count;
+            if (i < 0 || i >= list->count) {
+                STORE_FRAME();
+                runtimeError(vm, "List index %d out of range (length %d).", i, list->count);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            push(vm, list->items[i]);
+        } else if (IS_MAP(obj)) {
+            if (!IS_STRING(index)) {
+                STORE_FRAME();
+                runtimeError(vm, "Map key must be a string.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            ObjMap* map = AS_MAP(obj);
+            Value value;
+            if (tableGet(&map->table, AS_STRING(index), &value)) {
+                push(vm, value);
+            } else {
+                push(vm, NIL_VAL);
+            }
+        } else if (IS_STRING(obj)) {
+            if (!IS_NUMBER(index)) {
+                STORE_FRAME();
+                runtimeError(vm, "String index must be a number.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            ObjString* str = AS_STRING(obj);
+            int i = (int)AS_NUMBER(index);
+            if (i < 0) i += str->length;
+            if (i < 0 || i >= str->length) {
+                STORE_FRAME();
+                runtimeError(vm, "String index out of range.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            push(vm, OBJ_VAL(copyString(vm, &str->chars[i], 1)));
+        } else {
+            STORE_FRAME();
+            runtimeError(vm, "Only lists, maps, and strings support indexing.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        NEXT();
+    }
+
+    CASE(INDEX_SET): {
+        Value value = pop(vm);
+        Value index = pop(vm);
+        Value obj = pop(vm);
+
+        if (IS_LIST(obj)) {
+            if (!IS_NUMBER(index)) {
+                STORE_FRAME();
+                runtimeError(vm, "List index must be a number.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            ObjList* list = AS_LIST(obj);
+            int i = (int)AS_NUMBER(index);
+            if (i < 0) i += list->count;
+            if (i < 0 || i >= list->count) {
+                STORE_FRAME();
+                runtimeError(vm, "List index out of range.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            list->items[i] = value;
+            push(vm, value);
+        } else if (IS_MAP(obj)) {
+            if (!IS_STRING(index)) {
+                STORE_FRAME();
+                runtimeError(vm, "Map key must be a string.");
+                return INTERPRET_RUNTIME_ERROR;
+            }
+            tableSet(&AS_MAP(obj)->table, AS_STRING(index), value);
+            push(vm, value);
+        } else {
+            STORE_FRAME();
+            runtimeError(vm, "Only lists and maps support index assignment.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        NEXT();
+    }
+
+    CASE(GET_PROPERTY): {
+        Value obj = peek(vm, 0);
+        ObjString* name = READ_STRING();
+
+        if (IS_MAP(obj)) {
+            Value value;
+            if (tableGet(&AS_MAP(obj)->table, name, &value)) {
+                pop(vm);
+                push(vm, value);
+            } else {
+                pop(vm);
+                push(vm, NIL_VAL);
+            }
+        } else if (IS_LIST(obj)) {
+            ObjList* list = AS_LIST(obj);
+            if (name->length == 6 && memcmp(name->chars, "length", 6) == 0) {
+                pop(vm);
+                push(vm, NUMBER_VAL(list->count));
+            } else {
+                STORE_FRAME();
+                runtimeError(vm, "List has no property '%s'.", name->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+        } else if (IS_STRING(obj)) {
+            ObjString* str = AS_STRING(obj);
+            if (name->length == 6 && memcmp(name->chars, "length", 6) == 0) {
+                pop(vm);
+                push(vm, NUMBER_VAL(str->length));
+            } else {
+                STORE_FRAME();
+                runtimeError(vm, "String has no property '%s'.", name->chars);
+                return INTERPRET_RUNTIME_ERROR;
+            }
+        } else {
+            STORE_FRAME();
+            runtimeError(vm, "Only maps, lists, and strings have properties.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        NEXT();
+    }
+
+    CASE(SET_PROPERTY): {
+        Value value = peek(vm, 0);
+        Value obj = peek(vm, 1);
+        ObjString* name = READ_STRING();
+
+        if (!IS_MAP(obj)) {
+            STORE_FRAME();
+            runtimeError(vm, "Only maps support property assignment.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+
+        tableSet(&AS_MAP(obj)->table, name, value);
+        Value assignedValue = pop(vm);
+        pop(vm);
+        push(vm, assignedValue);
+        NEXT();
+    }
+
+    CASE(ALLOW): {
+        uint8_t permType = READ_BYTE();
+        ObjString* target = READ_STRING();
+        addPermission(&vm->permissions, (PermissionType)permType,
+                      target->chars, target->length);
+        NEXT();
+    }
+
+    CASE(PUSH_HANDLER): {
+        uint16_t offset = READ_SHORT();
+        if (vm->handlerCount >= HANDLER_MAX) {
+            STORE_FRAME();
+            runtimeError(vm, "Too many nested error handlers.");
+            return INTERPRET_RUNTIME_ERROR;
+        }
+        ErrorHandler* handler = &vm->handlers[vm->handlerCount++];
+        handler->handlerIP = ip + offset;
+        handler->frameCount = vm->frameCount;
+        handler->stackTop = vm->stackTop;
+        NEXT();
+    }
+
+    CASE(POP_HANDLER):
+        if (vm->handlerCount > 0) {
+            vm->handlerCount--;
+        }
+        NEXT();
+
+    CASE(THROW):
+        NEXT();
+
+    LOOP_END
+
+#undef STORE_FRAME
+#undef LOAD_FRAME
 #undef READ_BYTE
 #undef READ_SHORT
 #undef READ_CONSTANT
 #undef READ_STRING
 #undef BINARY_OP
+#undef DISPATCH
+#undef CASE
+#undef NEXT
+#undef LOOP_START
+#undef LOOP_END
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 // ---- Public API ----
 

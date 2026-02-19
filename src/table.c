@@ -48,6 +48,16 @@ bool tableGet(Table* table, ObjString* key, Value* value) {
     return true;
 }
 
+bool tableGetEntry(Table* table, ObjString* key, Entry** entryOut) {
+    if (table->count == 0) return false;
+
+    Entry* entry = findEntry(table->entries, table->capacity, key);
+    if (entry->key == NULL) return false;
+
+    if (entryOut != NULL) *entryOut = entry;
+    return true;
+}
+
 static void adjustCapacity(Table* table, int capacity) {
     Entry* entries = ALLOCATE(Entry, capacity);
     for (int i = 0; i < capacity; i++) {
@@ -130,12 +140,10 @@ ObjString* tableFindString(Table* table, const char* chars, int length,
 void markTable(Table* table) {
     for (int i = 0; i < table->capacity; i++) {
         Entry* entry = &table->entries[i];
+        if (entry->key == NULL) continue;
         markObject((Obj*)entry->key);
-        if (entry->key != NULL) {
-            // Only mark values for non-tombstone entries
-            if (IS_OBJ(entry->value)) {
-                markObject(AS_OBJ(entry->value));
-            }
+        if (IS_OBJ(entry->value)) {
+            markObject(AS_OBJ(entry->value));
         }
     }
 }

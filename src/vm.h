@@ -11,6 +11,13 @@
 #define FRAMES_MAX 256
 #define STACK_MAX (FRAMES_MAX * UINT8_COUNT)
 #define HANDLER_MAX 64
+#define GLOBAL_IC_SIZE 512
+
+typedef struct {
+    ObjString* key;
+    Entry* entry;
+    int tableCapacity;
+} GlobalICSlot;
 
 typedef struct {
     ObjClosure* closure;
@@ -56,6 +63,9 @@ struct VM {
     // Pending error (for handler dispatch)
     bool hasError;
     Value currentError;     // error map: {message, type, exitCode, ...}
+
+    // Global variable inline cache
+    GlobalICSlot globalIC[GLOBAL_IC_SIZE];
 };
 
 typedef enum {
@@ -68,6 +78,13 @@ void initVM(VM* vm);
 void freeVM(VM* vm);
 InterpretResult interpret(VM* vm, const char* source);
 void defineNative(VM* vm, const char* name, NativeFn function, int arity);
+
+// Helpers exposed for module implementations
+void vmPush(VM* vm, Value value);
+Value vmPop(VM* vm);
+void vmRaiseError(VM* vm, const char* message, const char* type);
+void defineModuleNative(VM* vm, ObjMap* module, const char* name,
+                        NativeFn function, int arity);
 
 // Used by memory.c
 void setCurrentVM(VM* vm);

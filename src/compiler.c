@@ -40,6 +40,8 @@ typedef struct Compiler {
     // Break patches (max 256 breaks per loop)
     int breakJumps[256];
     int breakCount;
+
+    bool hadError;
 } Compiler;
 
 static void initCompiler(Compiler* compiler, Compiler* enclosing,
@@ -53,6 +55,7 @@ static void initCompiler(Compiler* compiler, Compiler* enclosing,
     compiler->loopStart = -1;
     compiler->loopDepth = 0;
     compiler->breakCount = 0;
+    compiler->hadError = false;
 
     // Reserve slot 0 for the function itself
     Local* local = &compiler->locals[compiler->localCount++];
@@ -112,6 +115,7 @@ static uint8_t makeConstant(Compiler* compiler, Value value) {
     int constant = addConstant(currentChunk(compiler), value);
     if (constant > UINT8_MAX) {
         fprintf(stderr, "Too many constants in one chunk.\n");
+        compiler->hadError = true;
         return 0;
     }
     return (uint8_t)constant;
@@ -345,28 +349,49 @@ static void compileCall(Compiler* compiler, AstNode* node) {
     int line = node->line;
     compileExpression(compiler, node->as.call.callee);
 
+    int argCount = node->as.call.argCount;
+    if (argCount > UINT8_MAX) {
+        fprintf(stderr, "[line %d] Error: Can't have more than 255 arguments.\n", line);
+        compiler->hadError = true;
+        argCount = UINT8_MAX;
+    }
+
     for (int i = 0; i < node->as.call.argCount; i++) {
         compileExpression(compiler, node->as.call.args[i]);
     }
 
-    emitBytes(compiler, OP_CALL, (uint8_t)node->as.call.argCount, line);
+    emitBytes(compiler, OP_CALL, (uint8_t)argCount, line);
 }
 
 static void compileList(Compiler* compiler, AstNode* node) {
     int line = node->line;
+    int count = node->as.list.count;
+    if (count > UINT8_MAX) {
+        fprintf(stderr, "[line %d] Error: Can't have more than 255 list elements.\n", line);
+        compiler->hadError = true;
+        count = UINT8_MAX;
+    }
+
     for (int i = 0; i < node->as.list.count; i++) {
         compileExpression(compiler, node->as.list.elements[i]);
     }
-    emitBytes(compiler, OP_BUILD_LIST, (uint8_t)node->as.list.count, line);
+    emitBytes(compiler, OP_BUILD_LIST, (uint8_t)count, line);
 }
 
 static void compileMap(Compiler* compiler, AstNode* node) {
     int line = node->line;
+    int count = node->as.map.count;
+    if (count > UINT8_MAX) {
+        fprintf(stderr, "[line %d] Error: Can't have more than 255 map entries.\n", line);
+        compiler->hadError = true;
+        count = UINT8_MAX;
+    }
+
     for (int i = 0; i < node->as.map.count; i++) {
         compileExpression(compiler, node->as.map.keys[i]);
         compileExpression(compiler, node->as.map.values[i]);
     }
-    emitBytes(compiler, OP_BUILD_MAP, (uint8_t)node->as.map.count, line);
+    emitBytes(compiler, OP_BUILD_MAP, (uint8_t)count, line);
 }
 
 static void compileIndex(Compiler* compiler, AstNode* node) {
@@ -909,11 +934,13 @@ static void compileNode(Compiler* compiler, AstNode* node) {
             int line = node->line;
             if (compiler->loopStart == -1) {
                 fprintf(stderr, "[line %d] Error: Can't use 'break' outside a loop.\n", line);
+                compiler->hadError = true;
                 break;
             }
             // Emit jump (will be patched later)
             if (compiler->breakCount >= 256) {
                 fprintf(stderr, "[line %d] Error: Too many break statements in loop.\n", line);
+                compiler->hadError = true;
                 break;
             }
             compiler->breakJumps[compiler->breakCount++] = emitJump(compiler, OP_JUMP, line);
@@ -924,6 +951,7 @@ static void compileNode(Compiler* compiler, AstNode* node) {
             int line = node->line;
             if (compiler->loopStart == -1) {
                 fprintf(stderr, "[line %d] Error: Can't use 'continue' outside a loop.\n", line);
+                compiler->hadError = true;
                 break;
             }
             emitLoop(compiler, compiler->loopStart, line);
@@ -1043,6 +1071,8 @@ ObjFunction* compile(VM* vm, const char* source) {
 #endif
 
     arenaFree(&arena);
+
+    if (compiler.hadError) return NULL;
 
     return function;
 }

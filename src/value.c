@@ -26,40 +26,27 @@ void freeValueArray(ValueArray* array) {
 }
 
 void printValue(Value value) {
-    switch (value.type) {
-        case VAL_BOOL:
-            printf(AS_BOOL(value) ? "true" : "false");
-            break;
-        case VAL_NIL:
-            printf("nil");
-            break;
-        case VAL_NUMBER: {
-            double num = AS_NUMBER(value);
-            if (num == (int)num) {
-                printf("%d", (int)num);
-            } else {
-                printf("%g", num);
-            }
-            break;
+    if (IS_BOOL(value)) {
+        printf(AS_BOOL(value) ? "true" : "false");
+    } else if (IS_NIL(value)) {
+        printf("nil");
+    } else if (IS_NUMBER(value)) {
+        double num = AS_NUMBER(value);
+        if (num == (int)num) {
+            printf("%d", (int)num);
+        } else {
+            printf("%g", num);
         }
-        case VAL_OBJ:
-            printObject(value);
-            break;
+    } else if (IS_OBJ(value)) {
+        printObject(value);
     }
 }
 
 bool valuesEqual(Value a, Value b) {
-    if (a.type != b.type) return false;
-    switch (a.type) {
-        case VAL_BOOL:   return AS_BOOL(a) == AS_BOOL(b);
-        case VAL_NIL:    return true;
-        case VAL_NUMBER: return AS_NUMBER(a) == AS_NUMBER(b);
-        case VAL_OBJ:    return AS_OBJ(a) == AS_OBJ(b); // identity (interned strings)
-        default:         return false;
+    // With NaN boxing, bit equality works for nil, bool, and interned strings.
+    // Special case: NaN != NaN per IEEE 754.
+    if (IS_NUMBER(a) && IS_NUMBER(b)) {
+        return AS_NUMBER(a) == AS_NUMBER(b);
     }
-}
-
-bool isFalsey(Value value) {
-    return IS_NIL(value) || (IS_BOOL(value) && !AS_BOOL(value)) ||
-           (IS_NUMBER(value) && AS_NUMBER(value) == 0);
+    return a == b;
 }

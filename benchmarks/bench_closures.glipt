@@ -1,0 +1,26 @@
+# Closure + function call overhead benchmark
+fn make_counter() {
+    count = 0
+    fn increment() {
+        count = count + 1
+        return count
+    }
+    return increment
+}
+
+fn run_counters(n) {
+    c1 = make_counter()
+    c2 = make_counter()
+    c3 = make_counter()
+    i = 0
+    while i < n {
+        c1()
+        c2()
+        c3()
+        i = i + 1
+    }
+    return c1() + c2() + c3()
+}
+
+result = run_counters(500000)
+print("Counter total: " + str(result))

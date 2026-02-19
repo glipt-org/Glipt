@@ -1,0 +1,20 @@
+# String-heavy benchmark: build, split, manipulate
+result = ""
+i = 0
+while i < 5000 {
+    result = result + str(i) + ","
+    i = i + 1
+}
+print("Length: " + str(len(result)))
+
+# Count how many chars are digits
+count = 0
+i = 0
+while i < len(result) {
+    c = result[i]
+    if c != "," {
+        count = count + 1
+    }
+    i = i + 1
+}
+print("Digit chars: " + str(count))

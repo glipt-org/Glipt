@@ -59,17 +59,8 @@ typedef enum {
     OP_PRINT,
     OP_POP,
 
-    // Iteration
-    OP_GET_ITERATOR,
-    OP_ITERATOR_NEXT,
-
     // Glipt-specific
-    OP_EXEC,
-    OP_PARALLEL_BEGIN,
-    OP_PARALLEL_TASK,
-    OP_PARALLEL_END,
     OP_ALLOW,           // 1-byte perm type + 1-byte constant index (target string)
-    OP_CHECK_PERMISSION,
     OP_PUSH_HANDLER,    // 2-byte jump offset to handler code
     OP_POP_HANDLER,
     OP_THROW,

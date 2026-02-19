@@ -35,8 +35,10 @@ static ObjString* allocateString(VM* vm, const char* chars, int length,
     memcpy(string->chars, chars, length);
     string->chars[length] = '\0';
 
-    // Intern the string
+    // Protect from GC during intern table resize
+    vmPush(vm, OBJ_VAL(string));
     tableSet(&vm->strings, string, NIL_VAL);
+    vmPop(vm);
 
     return string;
 }

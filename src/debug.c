@@ -100,12 +100,6 @@ int disassembleInstruction(Chunk* chunk, int offset) {
         case OP_SET_PROPERTY:  return constantInstruction("OP_SET_PROPERTY", chunk, offset);
         case OP_PRINT:         return simpleInstruction("OP_PRINT", offset);
         case OP_POP:           return simpleInstruction("OP_POP", offset);
-        case OP_GET_ITERATOR:  return simpleInstruction("OP_GET_ITERATOR", offset);
-        case OP_ITERATOR_NEXT: return simpleInstruction("OP_ITERATOR_NEXT", offset);
-        case OP_EXEC:          return byteInstruction("OP_EXEC", chunk, offset);
-        case OP_PARALLEL_BEGIN:return byteInstruction("OP_PARALLEL_BEGIN", chunk, offset);
-        case OP_PARALLEL_TASK: return simpleInstruction("OP_PARALLEL_TASK", offset);
-        case OP_PARALLEL_END:  return simpleInstruction("OP_PARALLEL_END", offset);
         case OP_ALLOW: {
             uint8_t permType = chunk->code[offset + 1];
             uint8_t constant = chunk->code[offset + 2];
@@ -115,7 +109,6 @@ int disassembleInstruction(Chunk* chunk, int offset) {
             printf("\n");
             return offset + 3;
         }
-        case OP_CHECK_PERMISSION: return byteInstruction("OP_CHECK_PERMISSION", chunk, offset);
         case OP_PUSH_HANDLER:  return jumpInstruction("OP_PUSH_HANDLER", 1, chunk, offset);
         case OP_POP_HANDLER:   return simpleInstruction("OP_POP_HANDLER", offset);
         case OP_THROW:         return simpleInstruction("OP_THROW", offset);

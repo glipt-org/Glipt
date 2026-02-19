@@ -23,9 +23,19 @@ int parseCommand(const char* command, char*** argvOut) {
         while (*p && isspace((unsigned char)*p)) p++;
         if (!*p) break;
 
-        // Start of argument
-        char buf[4096];
+        // Dynamic buffer for current argument
+        int bufCap = 256;
         int len = 0;
+        char* buf = (char*)malloc(bufCap);
+
+#define APPEND_CHAR(c) \
+    do { \
+        if (len >= bufCap - 1) { \
+            bufCap *= 2; \
+            buf = (char*)realloc(buf, bufCap); \
+        } \
+        buf[len++] = (c); \
+    } while (0)
 
         while (*p && !isspace((unsigned char)*p)) {
             if (*p == '"') {
@@ -34,26 +44,28 @@ int parseCommand(const char* command, char*** argvOut) {
                     if (*p == '\\' && p[1]) {
                         p++;
                     }
-                    if (len < (int)sizeof(buf) - 1) buf[len++] = *p;
+                    APPEND_CHAR(*p);
                     p++;
                 }
                 if (*p == '"') p++;
             } else if (*p == '\'') {
                 p++; // skip opening quote
                 while (*p && *p != '\'') {
-                    if (len < (int)sizeof(buf) - 1) buf[len++] = *p;
+                    APPEND_CHAR(*p);
                     p++;
                 }
                 if (*p == '\'') p++;
             } else if (*p == '\\' && p[1]) {
                 p++;
-                if (len < (int)sizeof(buf) - 1) buf[len++] = *p;
+                APPEND_CHAR(*p);
                 p++;
             } else {
-                if (len < (int)sizeof(buf) - 1) buf[len++] = *p;
+                APPEND_CHAR(*p);
                 p++;
             }
         }
+
+#undef APPEND_CHAR
 
         buf[len] = '\0';
 
@@ -61,8 +73,7 @@ int parseCommand(const char* command, char*** argvOut) {
             capacity *= 2;
             argv = (char**)realloc(argv, sizeof(char*) * capacity);
         }
-        argv[argc] = (char*)malloc(len + 1);
-        memcpy(argv[argc], buf, len + 1);
+        argv[argc] = buf; // transfer ownership
         argc++;
     }
 

@@ -4,6 +4,7 @@
 #include "common.h"
 #include "value.h"
 #include "opcode.h"
+#include "table.h"
 
 typedef struct {
     int count;
@@ -11,6 +12,7 @@ typedef struct {
     uint8_t* code;
     int* lines;         // source line for each byte
     ValueArray constants;
+    Table constantIndex; // string constant dedup (ObjString* -> index)
 } Chunk;
 
 void initChunk(Chunk* chunk);

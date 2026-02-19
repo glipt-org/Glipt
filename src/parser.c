@@ -87,6 +87,19 @@ static bool check(Parser* parser, TokenType type) {
     return parser->current.type == type;
 }
 
+static bool isKeywordToken(TokenType type) {
+    return type >= TOKEN_ALLOW && type <= TOKEN_ENV;
+}
+
+// After '.', accept identifiers and keywords as property names
+static void consumePropertyName(Parser* parser) {
+    if (parser->current.type == TOKEN_IDENTIFIER || isKeywordToken(parser->current.type)) {
+        advanceParser(parser);
+        return;
+    }
+    errorAtCurrent(parser, "Expected property name after '.'.");
+}
+
 static bool matchToken(Parser* parser, TokenType type) {
     if (!check(parser, type)) return false;
     advanceParser(parser);
@@ -447,7 +460,7 @@ static AstNode* parsePostfix(Parser* parser, AstNode* left) {
         if (matchToken(parser, TOKEN_DOT)) {
             int line = parser->previous.line;
             int col = parser->previous.column;
-            consume(parser, TOKEN_IDENTIFIER, "Expected property name after '.'.");
+            consumePropertyName(parser);
             const char* name = parser->previous.start;
             int nameLen = parser->previous.length;
 
