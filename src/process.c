@@ -1,10 +1,52 @@
+// strdup is POSIX, not C11 standard — must define _POSIX_C_SOURCE before any includes
+#define _POSIX_C_SOURCE 200809L
+
 #include "process.h"
+
+#include <errno.h>
+#include <ctype.h>
+
+#ifdef _WIN32
+
+// ---- Windows stubs (posix_spawn / pipes not available on Windows) ----
+
+int parseCommand(const char* command, char*** argvOut) {
+    (void)command;
+    *argvOut = (char**)malloc(sizeof(char*));
+    (*argvOut)[0] = NULL;
+    return 0;
+}
+
+ProcessResult processExecv(const char** argv, int argc) {
+    (void)argv; (void)argc;
+    ProcessResult result;
+    memset(&result, 0, sizeof(result));
+    result.exitCode = -1;
+    result.stderrData = (char*)malloc(32);
+    strcpy(result.stderrData, "exec not supported on Windows");
+    result.stderrLength = (int)strlen(result.stderrData);
+    return result;
+}
+
+ProcessResult processExec(const char* command) {
+    (void)command;
+    return processExecv(NULL, 0);
+}
+
+void processResultFree(ProcessResult* result) {
+    free(result->stdoutData);
+    free(result->stderrData);
+    result->stdoutData = NULL;
+    result->stderrData = NULL;
+}
+
+#else
+
+// ---- POSIX implementation ----
 
 #include <unistd.h>
 #include <sys/wait.h>
 #include <spawn.h>
-#include <errno.h>
-#include <ctype.h>
 
 extern char **environ;
 
@@ -199,3 +241,5 @@ void processResultFree(ProcessResult* result) {
     result->stdoutData = NULL;
     result->stderrData = NULL;
 }
+
+#endif // _WIN32
