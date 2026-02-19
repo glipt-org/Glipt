@@ -38,8 +38,8 @@ Value parallelExec(VM* vm, int argCount, Value* args) {
     }
 
     // Spawn all tasks
-    ExecTask* tasks = (ExecTask*)malloc(sizeof(ExecTask) * count);
-    pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * count);
+    ExecTask* tasks = (ExecTask*)malloc(sizeof(ExecTask) * (size_t)count);
+    pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * (size_t)count);
 
     for (int i = 0; i < count; i++) {
         tasks[i].command = AS_CSTRING(commands->items[i]);
