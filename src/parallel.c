@@ -21,11 +21,11 @@ Value parallelExec(VM* vm, int argCount, Value* args) {
     if (argCount < 1 || !IS_LIST(args[0])) return NIL_VAL;
     ObjList* commands = AS_LIST(args[0]);
 
-    int count = commands->count;
-    if (count == 0) return OBJ_VAL(newList(vm));
+    if (commands->count <= 0) return OBJ_VAL(newList(vm));
+    size_t count = (size_t)commands->count;
 
     // Validate all commands are strings and check permissions
-    for (int i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++) {
         if (!IS_STRING(commands->items[i])) return NIL_VAL;
         const char* cmd = AS_CSTRING(commands->items[i]);
         if (!hasPermission(&vm->permissions, PERM_EXEC, cmd)) {
@@ -38,16 +38,16 @@ Value parallelExec(VM* vm, int argCount, Value* args) {
     }
 
     // Spawn all tasks
-    ExecTask* tasks = (ExecTask*)malloc(sizeof(ExecTask) * (size_t)count);
-    pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * (size_t)count);
+    ExecTask* tasks = (ExecTask*)malloc(sizeof(ExecTask) * count);
+    pthread_t* threads = (pthread_t*)malloc(sizeof(pthread_t) * count);
 
-    for (int i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++) {
         tasks[i].command = AS_CSTRING(commands->items[i]);
         pthread_create(&threads[i], NULL, execTaskRunner, &tasks[i]);
     }
 
     // Wait for all
-    for (int i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++) {
         pthread_join(threads[i], NULL);
     }
 
@@ -55,7 +55,7 @@ Value parallelExec(VM* vm, int argCount, Value* args) {
     ObjList* results = newList(vm);
     *vm->stackTop++ = OBJ_VAL(results); // GC protect
 
-    for (int i = 0; i < count; i++) {
+    for (size_t i = 0; i < count; i++) {
         ObjMap* map = newMap(vm);
         *vm->stackTop++ = OBJ_VAL(map); // GC protect
 
