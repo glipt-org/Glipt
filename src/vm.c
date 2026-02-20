@@ -450,7 +450,10 @@ static Value sleepNative(VM* vm, int argCount, Value* args) {
 #ifdef _WIN32
         Sleep((DWORD)(seconds * 1000));
 #else
-        usleep((useconds_t)(seconds * 1000000));
+        struct timespec ts;
+        ts.tv_sec = (time_t)seconds;
+        ts.tv_nsec = (long)((seconds - (time_t)seconds) * 1e9);
+        nanosleep(&ts, NULL);
 #endif
     }
     return NIL_VAL;
