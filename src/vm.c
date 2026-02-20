@@ -1,3 +1,7 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "vm.h"
 #include "compiler.h"
 #include "debug.h"
@@ -17,7 +21,12 @@
 #include <math.h>
 #include <time.h>
 #include <ctype.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 // Forward declarations
 static inline void push(VM* vm, Value value);
@@ -438,7 +447,11 @@ static Value sleepNative(VM* vm, int argCount, Value* args) {
     if (argCount != 1 || !IS_NUMBER(args[0])) return NIL_VAL;
     double seconds = AS_NUMBER(args[0]);
     if (seconds > 0) {
+#ifdef _WIN32
+        Sleep((DWORD)(seconds * 1000));
+#else
         usleep((useconds_t)(seconds * 1000000));
+#endif
     }
     return NIL_VAL;
 }
@@ -1085,11 +1098,6 @@ static void concatenate(VM* vm) {
 
 // ---- Execution Loop ----
 
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wgnu-label-as-value"
-#endif
-
 static InterpretResult run(VM* vm) {
     CallFrame* frame = &vm->frames[vm->frameCount - 1];
 
@@ -1702,10 +1710,6 @@ static InterpretResult run(VM* vm) {
 #undef LOOP_START
 #undef LOOP_END
 }
-
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
 
 // ---- Public API ----
 

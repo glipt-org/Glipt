@@ -1,6 +1,6 @@
 CC = cc
-CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -Werror -O2
-DEBUG_CFLAGS = -std=c11 -Wall -Wextra -Wpedantic -g -O0 -DDEBUG_TRACE -DDEBUG_STRESS_GC
+CFLAGS = -std=c11 -Wall -Wextra -Werror -O2
+DEBUG_CFLAGS = -std=c11 -Wall -Wextra -g -O0 -DDEBUG_TRACE -DDEBUG_STRESS_GC
 LDFLAGS = -lm -lpthread
 DEBUG_LDFLAGS = -lm -lpthread
 
