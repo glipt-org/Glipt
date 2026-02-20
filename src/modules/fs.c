@@ -1,7 +1,24 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "fs.h"
 #include "../object.h"
 #include "../permission.h"
 #include "../table.h"
+
+#ifdef _WIN32
+
+// Windows: register fs module with no functions for now
+void registerFsModule(VM* vm) {
+    ObjMap* fs = newMap(vm);
+    vmPush(vm, OBJ_VAL(fs));
+    ObjString* name = copyString(vm, "fs", 2);
+    tableSet(&vm->globals, name, OBJ_VAL(fs));
+    vmPop(vm);
+}
+
+#else
 
 #include <sys/stat.h>
 #include <dirent.h>
@@ -304,3 +321,5 @@ void registerFsModule(VM* vm) {
     tableSet(&vm->globals, name, OBJ_VAL(fs));
     vmPop(vm);
 }
+
+#endif // !_WIN32
