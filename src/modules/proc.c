@@ -33,7 +33,7 @@ static Value procExecNative(VM* vm, int argCount, Value* args) {
     const char* command = AS_CSTRING(args[0]);
 
     if (!hasPermission(&vm->permissions, PERM_EXEC, command)) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Permission denied: exec \"%s\"", command);
         vmRaiseError(vm, msg, "permission");
         return NIL_VAL;
@@ -90,7 +90,7 @@ static Value procExecNative(VM* vm, int argCount, Value* args) {
     free(pr.stderrData);
 
     if (pr.exitCode != 0) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Command failed with exit code %d: %s",
                  pr.exitCode, command);
         vmPop(vm);

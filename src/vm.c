@@ -297,7 +297,7 @@ static Value execNative(VM* vm, int argCount, Value* args) {
 
     // Permission check
     if (!hasPermission(&vm->permissions, PERM_EXEC, command)) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Permission denied: exec \"%s\"", command);
         raiseError(vm, msg, "permission");
         return NIL_VAL;
@@ -336,7 +336,7 @@ static Value execNative(VM* vm, int argCount, Value* args) {
 
     // Raise error on non-zero exit code
     if (result.exitCode != 0) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Command failed with exit code %d: %s",
                  result.exitCode, command);
         raiseError(vm, msg, "exec");
@@ -365,7 +365,7 @@ static Value readFileNative(VM* vm, int argCount, Value* args) {
 
     // Permission check
     if (!hasPermission(&vm->permissions, PERM_READ, path)) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Permission denied: read \"%s\"", path);
         raiseError(vm, msg, "permission");
         return NIL_VAL;
@@ -410,7 +410,7 @@ static Value writeFileNative(VM* vm, int argCount, Value* args) {
 
     // Permission check
     if (!hasPermission(&vm->permissions, PERM_WRITE, path)) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Permission denied: write \"%s\"", path);
         raiseError(vm, msg, "permission");
         return BOOL_VAL(false);
@@ -431,7 +431,7 @@ static Value envNative(VM* vm, int argCount, Value* args) {
 
     const char* name = AS_CSTRING(args[0]);
     if (!hasPermission(&vm->permissions, PERM_ENV, name)) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Permission denied: env \"%s\"", name);
         raiseError(vm, msg, "permission");
         return NIL_VAL;

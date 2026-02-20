@@ -111,7 +111,7 @@ static Value doHttpRequest(VM* vm, const char* method, const char* url,
 
     int err = getaddrinfo(host, port, &hints, &res);
     if (err != 0) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "DNS resolution failed: %s", host);
         vmRaiseError(vm, msg, "net");
         return NIL_VAL;
@@ -135,7 +135,7 @@ static Value doHttpRequest(VM* vm, const char* method, const char* url,
     if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
         freeaddrinfo(res);
         close(sock);
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Connection failed: %s:%s", host, port);
         vmRaiseError(vm, msg, "net");
         return NIL_VAL;
@@ -271,7 +271,7 @@ static Value netResolveNative(VM* vm, int argCount, Value* args) {
     const char* hostname = AS_CSTRING(args[0]);
 
     if (!hasPermission(&vm->permissions, PERM_NET, hostname)) {
-        char msg[256];
+        char msg[512];
         snprintf(msg, sizeof(msg), "Permission denied: net \"%s\"", hostname);
         vmRaiseError(vm, msg, "permission");
         return NIL_VAL;

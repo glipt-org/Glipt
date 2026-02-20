@@ -29,7 +29,7 @@ Value parallelExec(VM* vm, int argCount, Value* args) {
         if (!IS_STRING(commands->items[i])) return NIL_VAL;
         const char* cmd = AS_CSTRING(commands->items[i]);
         if (!hasPermission(&vm->permissions, PERM_EXEC, cmd)) {
-            char msg[256];
+            char msg[512];
             snprintf(msg, sizeof(msg), "Permission denied: exec \"%s\"", cmd);
             // Can't call raiseError from here, just return nil
             fprintf(stderr, "%s\n", msg);
