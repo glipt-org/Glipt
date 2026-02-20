@@ -1,7 +1,23 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "net.h"
 #include "../object.h"
 #include "../permission.h"
 #include "../table.h"
+
+#ifdef _WIN32
+
+void registerNetModule(VM* vm) {
+    ObjMap* net = newMap(vm);
+    vmPush(vm, OBJ_VAL(net));
+    ObjString* name = copyString(vm, "net", 3);
+    tableSet(&vm->globals, name, OBJ_VAL(net));
+    vmPop(vm);
+}
+
+#else
 
 #include <sys/socket.h>
 #include <netdb.h>
@@ -307,3 +323,5 @@ void registerNetModule(VM* vm) {
     tableSet(&vm->globals, name, OBJ_VAL(net));
     vmPop(vm);
 }
+
+#endif // !_WIN32

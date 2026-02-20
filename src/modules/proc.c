@@ -1,8 +1,24 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "proc.h"
 #include "../object.h"
 #include "../permission.h"
 #include "../process.h"
 #include "../table.h"
+
+#ifdef _WIN32
+
+void registerProcModule(VM* vm) {
+    ObjMap* proc = newMap(vm);
+    vmPush(vm, OBJ_VAL(proc));
+    ObjString* name = copyString(vm, "proc", 4);
+    tableSet(&vm->globals, name, OBJ_VAL(proc));
+    vmPop(vm);
+}
+
+#else
 
 #include <signal.h>
 #include <unistd.h>
@@ -150,7 +166,12 @@ static Value procRetryNative(VM* vm, int argCount, Value* args) {
             // Wait before retrying (exponential backoff)
             if (i < attempts - 1) {
                 double wait = backoff * (1 << i);
-                if (wait > 0) usleep((useconds_t)(wait * 1000000));
+                if (wait > 0) {
+                    struct timespec ts;
+                    ts.tv_sec = (time_t)wait;
+                    ts.tv_nsec = (long)((wait - (time_t)wait) * 1e9);
+                    nanosleep(&ts, NULL);
+                }
             }
         }
     }
@@ -169,7 +190,10 @@ static Value procSleepNative(VM* vm, int argCount, Value* args) {
     if (argCount != 1 || !IS_NUMBER(args[0])) return NIL_VAL;
     double seconds = AS_NUMBER(args[0]);
     if (seconds > 0) {
-        usleep((useconds_t)(seconds * 1000000));
+        struct timespec ts;
+        ts.tv_sec = (time_t)seconds;
+        ts.tv_nsec = (long)((seconds - (time_t)seconds) * 1e9);
+        nanosleep(&ts, NULL);
     }
     return NIL_VAL;
 }
@@ -191,3 +215,5 @@ void registerProcModule(VM* vm) {
     tableSet(&vm->globals, name, OBJ_VAL(proc));
     vmPop(vm);
 }
+
+#endif // !_WIN32

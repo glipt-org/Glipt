@@ -1,10 +1,25 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "sys.h"
 #include "../object.h"
 #include "../table.h"
 
+#ifdef _WIN32
+
+void registerSysModule(VM* vm) {
+    ObjMap* sys = newMap(vm);
+    vmPush(vm, OBJ_VAL(sys));
+    ObjString* name = copyString(vm, "sys", 3);
+    tableSet(&vm->globals, name, OBJ_VAL(sys));
+    vmPop(vm);
+}
+
+#else
+
 #include <unistd.h>
 #include <sys/utsname.h>
-#include <sys/sysctl.h>
 #include <time.h>
 #include <pwd.h>
 
@@ -74,8 +89,12 @@ static Value sysArchNative(VM* vm, int argCount, Value* args) {
 
 static Value sysCpuCountNative(VM* vm, int argCount, Value* args) {
     (void)vm; (void)argCount; (void)args;
+#ifdef _SC_NPROCESSORS_ONLN
     long cpus = sysconf(_SC_NPROCESSORS_ONLN);
     return NUMBER_VAL(cpus > 0 ? (double)cpus : 1.0);
+#else
+    return NUMBER_VAL(1.0);
+#endif
 }
 
 static Value sysClockNative(VM* vm, int argCount, Value* args) {
@@ -135,3 +154,5 @@ void registerSysModule(VM* vm) {
     tableSet(&vm->globals, name, OBJ_VAL(sys));
     vmPop(vm);
 }
+
+#endif // !_WIN32
