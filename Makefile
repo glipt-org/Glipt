@@ -21,7 +21,7 @@ DEBUG_MOD_OBJS = $(patsubst $(MOD_DIR)/%.c, $(BUILD_DIR)/debug_mod_%.o, $(MOD_SR
 all: $(TARGET)
 
 $(TARGET): $(OBJS) $(MOD_OBJS)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -34,7 +34,7 @@ debug: LDFLAGS = $(DEBUG_LDFLAGS)
 debug: $(TARGET)_debug
 
 $(TARGET)_debug: $(DEBUG_OBJS) $(DEBUG_MOD_OBJS)
-	$(CC) $(DEBUG_CFLAGS) $(DEBUG_LDFLAGS) -o $@ $^
+	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(DEBUG_LDFLAGS)
 
 $(BUILD_DIR)/debug_%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(DEBUG_CFLAGS) -c -o $@ $<
