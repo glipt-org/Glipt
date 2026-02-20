@@ -1,5 +1,5 @@
-#ifndef _WIN32
-#define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
 #endif
 
 #include "proc.h"
