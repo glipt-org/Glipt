@@ -293,8 +293,43 @@ static Token scanNumber(Scanner* scanner) {
     return makeToken(scanner, TOKEN_NUMBER);
 }
 
+static Token scanFString(Scanner* scanner, char quote) {
+    // scanner->start points to 'f', current is just past the opening quote
+    // Scan until closing quote, allowing { } for interpolation
+    int braceDepth = 0;
+    while (!isAtEnd(scanner)) {
+        char ch = peek(scanner);
+        if (ch == '\\' && peekNext(scanner) != '\0') {
+            advance(scanner); // skip backslash
+            advance(scanner); // skip escaped char
+            continue;
+        }
+        if (ch == '{') braceDepth++;
+        if (ch == '}') braceDepth--;
+        if (ch == quote && braceDepth <= 0) break;
+        if (ch == '\n') {
+            scanner->line++;
+            scanner->column = 0;
+        }
+        advance(scanner);
+    }
+
+    if (isAtEnd(scanner)) return errorToken(scanner, "Unterminated f-string.");
+    advance(scanner); // closing quote
+    return makeToken(scanner, TOKEN_FSTRING);
+}
+
 static Token scanIdentifier(Scanner* scanner) {
     while (isAlpha(peek(scanner)) || isDigit(peek(scanner))) advance(scanner);
+
+    // Check for f-string: identifier is exactly "f" followed by quote
+    if ((scanner->current - scanner->start == 1) &&
+        *scanner->start == 'f' &&
+        (peek(scanner) == '"' || peek(scanner) == '\'')) {
+        char quote = advance(scanner); // consume opening quote
+        return scanFString(scanner, quote);
+    }
+
     return makeToken(scanner, identifierType(scanner));
 }
 
@@ -408,6 +443,7 @@ const char* tokenTypeName(TokenType type) {
         case TOKEN_STRING: return "STRING";
         case TOKEN_NUMBER: return "NUMBER";
         case TOKEN_RAW_STRING: return "RAW_STRING";
+        case TOKEN_FSTRING: return "FSTRING";
         case TOKEN_ALLOW: return "ALLOW";
         case TOKEN_AND: return "AND";
         case TOKEN_AS: return "AS";

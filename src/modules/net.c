@@ -26,6 +26,8 @@ void registerNetModule(VM* vm) {
 #include <unistd.h>
 #include <errno.h>
 
+#include "../process.h"
+
 // ---- URL Parsing ----
 
 static bool parseUrl(const char* url, char* host, int hostLen,
@@ -78,6 +80,89 @@ static bool parseUrl(const char* url, char* host, int hostLen,
     return true;
 }
 
+// ---- HTTPS via system curl ----
+
+static Value doHttpViaCurl(VM* vm, const char* method, const char* url,
+                           const char* host, const char* body, int bodyLen) {
+    // Permission check
+    if (!hasPermission(&vm->permissions, PERM_NET, host)) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "Permission denied: net \"%s\"", host);
+        vmRaiseError(vm, msg, "permission");
+        return NIL_VAL;
+    }
+
+    // Build curl command as argv array
+    // curl -s -X METHOD -w "\n%{http_code}" [-d body] [-H ...] url
+    const char* argv[16];
+    int argc = 0;
+    argv[argc++] = "curl";
+    argv[argc++] = "-s";
+    argv[argc++] = "-X";
+    argv[argc++] = method;
+    argv[argc++] = "-w";
+    argv[argc++] = "\n%{http_code}";
+
+    if (body && bodyLen > 0) {
+        argv[argc++] = "-H";
+        argv[argc++] = "Content-Type: application/json";
+        argv[argc++] = "-d";
+        argv[argc++] = body;
+    }
+
+    argv[argc++] = url;
+
+    ProcessResult proc = processExecv(argv, argc);
+
+    if (proc.exitCode != 0) {
+        char msg[512];
+        if (proc.stderrData && proc.stderrLength > 0) {
+            snprintf(msg, sizeof(msg), "curl failed: %.*s",
+                     proc.stderrLength > 200 ? 200 : proc.stderrLength,
+                     proc.stderrData);
+        } else {
+            snprintf(msg, sizeof(msg), "curl failed with exit code %d (is curl installed?)",
+                     proc.exitCode);
+        }
+        processResultFree(&proc);
+        vmRaiseError(vm, msg, "net");
+        return NIL_VAL;
+    }
+
+    // Parse: body is everything before the last line, status is the last line
+    int status = 0;
+    char* bodyEnd = proc.stdoutData;
+    int bLen = proc.stdoutLength;
+
+    // Find last newline — status code is after it
+    char* lastNl = NULL;
+    for (int i = bLen - 1; i >= 0; i--) {
+        if (proc.stdoutData[i] == '\n') {
+            lastNl = &proc.stdoutData[i];
+            break;
+        }
+    }
+
+    if (lastNl) {
+        status = atoi(lastNl + 1);
+        bLen = (int)(lastNl - proc.stdoutData);
+    }
+
+    // Build result map
+    ObjMap* result = newMap(vm);
+    vmPush(vm, OBJ_VAL(result));
+
+    tableSet(&result->table,
+        copyString(vm, "status", 6), NUMBER_VAL(status));
+    tableSet(&result->table,
+        copyString(vm, "body", 4),
+        OBJ_VAL(copyString(vm, bodyEnd, bLen)));
+
+    processResultFree(&proc);
+    vmPop(vm);
+    return OBJ_VAL(result);
+}
+
 // ---- Simple HTTP Client (plain HTTP only, no TLS) ----
 
 static Value doHttpRequest(VM* vm, const char* method, const char* url,
@@ -91,8 +176,7 @@ static Value doHttpRequest(VM* vm, const char* method, const char* url,
     }
 
     if (https) {
-        vmRaiseError(vm, "HTTPS not supported (use HTTP or install libcurl)", "net");
-        return NIL_VAL;
+        return doHttpViaCurl(vm, method, url, host, body, bodyLen);
     }
 
     // Permission check

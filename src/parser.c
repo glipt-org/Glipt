@@ -223,6 +223,119 @@ static AstNode* parseString(Parser* parser) {
                                 parser->previous.line, parser->previous.column);
 }
 
+// Helper: wrap an expression in str(expr)
+static AstNode* wrapInStr(Parser* parser, AstNode* expr, int line, int col) {
+    AstNode* strVar = astNewVariable(parser->arena, "str", 3, line, col);
+    AstNode** args = (AstNode**)arenaAlloc(parser->arena, sizeof(AstNode*));
+    args[0] = expr;
+    return astNewCall(parser->arena, strVar, args, 1, line, col);
+}
+
+static AstNode* parseFString(Parser* parser) {
+    Token token = parser->previous;
+    int line = token.line;
+    int col = token.column;
+
+    // Token is f"content" or f'content' — strip f, quote, and closing quote
+    const char* raw = token.start + 2;  // skip 'f' and opening quote
+    int rawLen = token.length - 3;       // subtract f, open quote, close quote
+
+    AstNode* result = NULL;
+
+    int i = 0;
+    while (i < rawLen) {
+        // Find next '{' or end
+        int litStart = i;
+        while (i < rawLen && raw[i] != '{') {
+            if (raw[i] == '\\' && i + 1 < rawLen) {
+                i += 2; // skip escaped char
+            } else {
+                i++;
+            }
+        }
+
+        // Emit literal part if non-empty
+        if (i > litStart) {
+            AstNode* lit = astNewLiteralString(parser->arena,
+                raw + litStart, i - litStart, false, line, col);
+            if (result == NULL) {
+                result = lit;
+            } else {
+                result = astNewBinary(parser->arena, TOKEN_PLUS,
+                    result, lit, line, col);
+            }
+        }
+
+        if (i >= rawLen) break;
+
+        // Skip '{'
+        i++;
+
+        // Find matching '}', handling nested braces
+        int exprStart = i;
+        int depth = 1;
+        while (i < rawLen && depth > 0) {
+            if (raw[i] == '{') depth++;
+            else if (raw[i] == '}') depth--;
+            if (depth > 0) i++;
+        }
+
+        if (depth != 0) {
+            errorAt(parser, &token, "Unterminated interpolation in f-string.");
+            return result ? result : astNewLiteralString(
+                parser->arena, "", 0, false, line, col);
+        }
+
+        int exprLen = i - exprStart;
+        i++; // skip '}'
+
+        if (exprLen == 0) continue;
+
+        // Parse the expression: create a null-terminated copy, set up temp scanner
+        char* exprText = (char*)arenaAlloc(parser->arena, exprLen + 1);
+        memcpy(exprText, raw + exprStart, exprLen);
+        exprText[exprLen] = '\0';
+
+        // Save parser state
+        Scanner savedScanner = parser->scanner;
+        Token savedCurrent = parser->current;
+        Token savedPrevious = parser->previous;
+        bool savedHadError = parser->hadError;
+        bool savedPanicMode = parser->panicMode;
+
+        // Parse expression with temp scanner
+        initScanner(&parser->scanner, exprText);
+        advanceParser(parser); // prime with first token
+        AstNode* expr = parseExpression(parser);
+
+        // Restore parser state
+        parser->scanner = savedScanner;
+        parser->current = savedCurrent;
+        parser->previous = savedPrevious;
+        parser->hadError = savedHadError;
+        parser->panicMode = savedPanicMode;
+
+        if (expr == NULL) continue;
+
+        // Wrap in str() for non-string expressions
+        AstNode* part = wrapInStr(parser, expr, line, col);
+
+        if (result == NULL) {
+            result = part;
+        } else {
+            result = astNewBinary(parser->arena, TOKEN_PLUS,
+                result, part, line, col);
+        }
+    }
+
+    // If the whole f-string was empty
+    if (result == NULL) {
+        result = astNewLiteralString(parser->arena, "", 0, false, line, col);
+    }
+
+    return result;
+}
+
 static AstNode* parseGrouping(Parser* parser) {
     AstNode* expr = parseExpression(parser);
     consume(parser, TOKEN_RIGHT_PAREN, "Expected ')' after expression.");
@@ -345,6 +458,11 @@ static AstNode* parsePrimary(Parser* parser) {
     // String
     if (matchToken(parser, TOKEN_STRING) || matchToken(parser, TOKEN_RAW_STRING)) {
         return parseString(parser);
+    }
+
+    // F-string (interpolated)
+    if (matchToken(parser, TOKEN_FSTRING)) {
+        return parseFString(parser);
     }
 
     // Boolean

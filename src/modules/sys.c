@@ -118,8 +118,13 @@ static Value sysCwdNative(VM* vm, int argCount, Value* args) {
 
 static Value sysArgsNative(VM* vm, int argCount, Value* args) {
     (void)argCount; (void)args;
-    // Return empty list (script args not captured yet)
     ObjList* list = newList(vm);
+    vmPush(vm, OBJ_VAL(list));
+    for (int i = 0; i < vm->scriptArgc; i++) {
+        int len = (int)strlen(vm->scriptArgv[i]);
+        listAppend(vm, list, OBJ_VAL(copyString(vm, vm->scriptArgv[i], len)));
+    }
+    vmPop(vm);
     return OBJ_VAL(list);
 }
 

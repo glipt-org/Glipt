@@ -44,6 +44,7 @@ typedef enum {
     TOKEN_STRING,           // "..." or '...'
     TOKEN_NUMBER,           // 42, 3.14
     TOKEN_RAW_STRING,       // `...`
+    TOKEN_FSTRING,          // f"...{expr}..."
 
     // Keywords
     TOKEN_ALLOW,

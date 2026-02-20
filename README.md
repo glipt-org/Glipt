@@ -16,6 +16,8 @@ Shell scripts are powerful but dangerous (easy to inject commands, hard to read)
 - **Structured data** - Built-in JSON parsing and serialization
 - **Error handling** - Catch and handle failures gracefully with `on failure`
 - **Parallel execution** - Run multiple commands concurrently
+- **HTTPS support** - Built-in HTTP/HTTPS client via system curl
+- **String interpolation** - F-strings: `f"Hello {name}!"`
 - **Zero dependencies** - Single binary, pure C11
 
 ## Performance
@@ -175,7 +177,7 @@ for order in orders {
 }
 
 write("output/enriched_orders.json", to_json(enriched_orders))
-print(format("Processed {} orders", len(enriched_orders)))
+println(f"Processed {len(enriched_orders)} orders")
 ```
 
 ### 3. System Monitoring
@@ -375,6 +377,19 @@ active = true             # Booleans
 nothing = nil             # Nil
 ```
 
+### String Interpolation
+
+```glipt
+name = "World"
+println(f"Hello {name}!")              # Hello World!
+
+x = 10
+println(f"{x} squared is {x * x}")    # 10 squared is 100
+
+items = [1, 2, 3]
+println(f"Count: {len(items)}")        # Count: 3
+```
+
 ### Functions
 
 ```glipt
@@ -425,6 +440,12 @@ print(nums[0])           # 1
 person = {"name": "Alice", "age": 30}
 print(person["name"])    # Alice
 print(person.age)        # 30 (dot notation)
+
+# Higher-order functions (work with closures)
+nums = [1, 2, 3, 4, 5]
+doubled = map_fn(nums, fn(x) { return x * 2 })     # [2, 4, 6, 8, 10]
+evens = filter(nums, fn(x) { return x % 2 == 0 })   # [2, 4]
+sum = reduce(nums, fn(a, b) { return a + b }, 0)     # 15
 ```
 
 ## CLI Reference
@@ -432,14 +453,24 @@ print(person.age)        # 30 (dot notation)
 ```bash
 glipt                          # Start REPL
 glipt repl                     # Start REPL
-glipt run <script>             # Run script (deny-by-default)
+glipt run <script> [args...]   # Run script (deny-by-default)
 glipt run --allow-all <script> # Run with all permissions
 glipt check <script>           # Syntax check only
 glipt disasm <script>          # Show bytecode disassembly
 glipt ast <script>             # Show AST (debug)
 glipt tokens <script>          # Show tokens (debug)
+glipt update                   # Check for updates
 glipt version                  # Show version
 glipt help                     # Show help
+```
+
+Script arguments are available via `sys.args()`:
+
+```bash
+glipt run --allow-all script.glipt foo bar
+```
+```glipt
+args = sys.args()  # ["foo", "bar"]
 ```
 
 ## REPL
@@ -448,7 +479,7 @@ Start an interactive session:
 
 ```bash
 $ ./glipt
-Glipt 0.1.0 REPL (type 'exit' to quit)
+Glipt 0.1.1 REPL (type 'exit' to quit)
 >>> x = 42
 >>> fn double(n) { return n * 2 }
 >>> print(double(x))
@@ -492,7 +523,7 @@ All tests exit with code 0 and produce expected output.
 ## Contributing
 
 - C11 standard, 4-space indentation, no external dependencies
-- Build must pass with `-Wall -Wextra -Wpedantic -Werror`
+- Build must pass with `-Wall -Wextra -Werror`
 
 ## License
 

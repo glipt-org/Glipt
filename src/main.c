@@ -1,3 +1,7 @@
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
+
 #include "common.h"
 #include "scanner.h"
 #include "parser.h"
@@ -5,6 +9,15 @@
 #include "vm.h"
 #include "compiler.h"
 #include "debug.h"
+#include "version.h"
+#include "process.h"
+
+#include <time.h>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 static char* readFile(const char* path) {
     FILE* file = fopen(path, "rb");
@@ -80,7 +93,7 @@ static void runRepl(void) {
     initVM(&vm);
     vm.permissions.allowAll = true; // REPL has all permissions
 
-    printf("Glipt 0.1.0 REPL (type 'exit' to quit)\n");
+    printf("Glipt %s REPL (type 'exit' to quit)\n", GLIPT_VERSION);
 
     char line[4096];
     char buffer[65536];
@@ -149,14 +162,142 @@ static void printUsage(void) {
     printf("  disasm <script>    Show bytecode disassembly\n");
     printf("  ast <script>       Show AST (debug)\n");
     printf("  tokens <script>    Show token stream (debug)\n");
+    printf("  update             Check for updates\n");
     printf("  version            Show version\n");
     printf("  help               Show this help\n");
 }
 
 static void printVersion(void) {
-    printf("Glipt 0.1.0\n");
+    printf("Glipt %s\n", GLIPT_VERSION);
     printf("Glue + Script - Process Orchestration Language\n");
 }
+
+// ---- Update Checker ----
+
+// Simple semver compare: returns >0 if a > b, 0 if equal, <0 if a < b
+// Handles "vX.Y.Z" or "X.Y.Z" format
+static int compareVersions(const char* a, const char* b) {
+    // Skip leading 'v'
+    if (*a == 'v') a++;
+    if (*b == 'v') b++;
+
+    int a1 = 0, a2 = 0, a3 = 0;
+    int b1 = 0, b2 = 0, b3 = 0;
+    sscanf(a, "%d.%d.%d", &a1, &a2, &a3);
+    sscanf(b, "%d.%d.%d", &b1, &b2, &b3);
+
+    if (a1 != b1) return a1 - b1;
+    if (a2 != b2) return a2 - b2;
+    return a3 - b3;
+}
+
+// Extract "tag_name" value from JSON (simple, no full parser needed)
+static bool extractTagName(const char* json, char* tag, int tagSize) {
+    const char* key = strstr(json, "\"tag_name\"");
+    if (!key) return false;
+    key += 10; // skip "tag_name"
+    while (*key == ' ' || *key == ':' || *key == ' ') key++;
+    if (*key == ':') key++;
+    while (*key == ' ') key++;
+    if (*key != '"') return false;
+    key++; // skip opening quote
+    int i = 0;
+    while (*key && *key != '"' && i < tagSize - 1) {
+        tag[i++] = *key++;
+    }
+    tag[i] = '\0';
+    return i > 0;
+}
+
+static void checkForUpdate(bool verbose) {
+    const char* argv[] = {
+        "curl", "-s", "-m", "5",
+        "https://api.github.com/repos/" GLIPT_REPO "/releases/latest",
+        NULL
+    };
+
+    ProcessResult proc = processExecv(argv, 5);
+
+    if (proc.exitCode != 0 || proc.stdoutLength == 0) {
+        if (verbose) {
+            fprintf(stderr, "Could not check for updates (is curl installed?).\n");
+        }
+        processResultFree(&proc);
+        return;
+    }
+
+    char latestTag[64];
+    if (!extractTagName(proc.stdoutData, latestTag, sizeof(latestTag))) {
+        if (verbose) {
+            fprintf(stderr, "Could not parse release info.\n");
+        }
+        processResultFree(&proc);
+        return;
+    }
+
+    processResultFree(&proc);
+
+    if (compareVersions(latestTag, GLIPT_VERSION) > 0) {
+        fprintf(stderr, "\nGlipt %s is available (you have %s).\n",
+                latestTag, GLIPT_VERSION);
+        fprintf(stderr, "Update: https://github.com/" GLIPT_REPO "/releases/latest\n\n");
+    } else if (verbose) {
+        printf("Glipt %s is up to date.\n", GLIPT_VERSION);
+    }
+}
+
+#ifndef _WIN32
+// Get path to ~/.glipt/ config directory, creating it if needed
+static bool getConfigDir(char* buf, int size) {
+    const char* home = getenv("HOME");
+    if (!home) return false;
+    int len = snprintf(buf, size, "%s/.glipt", home);
+    if (len >= size) return false;
+    mkdir(buf, 0755); // create if doesn't exist, ignore errors
+    return true;
+}
+
+// Returns true if we should auto-check (>24 hours since last check)
+static bool shouldAutoCheck(void) {
+    char dir[512];
+    if (!getConfigDir(dir, sizeof(dir))) return false;
+
+    char path[600];
+    snprintf(path, sizeof(path), "%s/last_update_check", dir);
+
+    struct stat st;
+    if (stat(path, &st) != 0) return true; // file doesn't exist, first run
+
+    time_t now = time(NULL);
+    return (now - st.st_mtime) > 86400; // >24 hours
+}
+
+static void touchCheckFile(void) {
+    char dir[512];
+    if (!getConfigDir(dir, sizeof(dir))) return;
+
+    char path[600];
+    snprintf(path, sizeof(path), "%s/last_update_check", dir);
+
+    FILE* f = fopen(path, "w");
+    if (f) fclose(f);
+}
+
+// Auto-check in background (fork + check + exit)
+static void autoCheckInBackground(void) {
+    if (!shouldAutoCheck()) return;
+
+    touchCheckFile(); // touch immediately to prevent race
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child process: check and exit
+        checkForUpdate(false);
+        _exit(0);
+    }
+    // Parent continues immediately (child will be reaped by init)
+}
+#endif
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -171,6 +312,11 @@ int main(int argc, char* argv[]) {
 
     if (strcmp(argv[1], "version") == 0 || strcmp(argv[1], "--version") == 0) {
         printVersion();
+        return 0;
+    }
+
+    if (strcmp(argv[1], "update") == 0) {
+        checkForUpdate(true);
         return 0;
     }
 
@@ -249,11 +395,13 @@ int main(int argc, char* argv[]) {
         // Parse flags
         bool allowAll = false;
         const char* scriptPath = NULL;
+        int scriptArgStart = -1;
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--allow-all") == 0) {
                 allowAll = true;
             } else if (scriptPath == NULL) {
                 scriptPath = argv[i];
+                scriptArgStart = i + 1;
             }
         }
         if (scriptPath == NULL) {
@@ -268,6 +416,13 @@ int main(int argc, char* argv[]) {
         if (allowAll) {
             vm.permissions.allowAll = true;
         }
+        if (scriptArgStart >= 0 && scriptArgStart < argc) {
+            vm.scriptArgc = argc - scriptArgStart;
+            vm.scriptArgv = &argv[scriptArgStart];
+        }
+#ifndef _WIN32
+        autoCheckInBackground();
+#endif
         InterpretResult result = interpret(&vm, source);
         freeVM(&vm);
         free(source);

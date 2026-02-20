@@ -28,6 +28,10 @@
 #include <unistd.h>
 #endif
 
+// Forward declarations for calling closures from native functions
+static bool callClosure(VM* vm, ObjClosure* closure, int argCount);
+static InterpretResult run(VM* vm);
+
 // Forward declarations
 static inline void push(VM* vm, Value value);
 static inline Value pop(VM* vm);
@@ -633,6 +637,38 @@ static Value sortNative(VM* vm, int argCount, Value* args) {
     return args[0];
 }
 
+// Call a closure/native from native context, returning the result.
+// The caller must have already pushed the callee and argCount arguments
+// onto vm->stackTop before calling this.
+static Value vmCallFunction(VM* vm, Value callee, int argCount) {
+    if (IS_NATIVE(callee)) {
+        Value result = AS_NATIVE(callee)->function(vm, argCount,
+            vm->stackTop - argCount);
+        vm->stackTop -= argCount + 1;
+        return result;
+    }
+
+    if (IS_CLOSURE(callee)) {
+        ObjClosure* closure = AS_CLOSURE(callee);
+        if (!callClosure(vm, closure, argCount)) {
+            vm->stackTop -= argCount + 1;
+            return NIL_VAL;
+        }
+        int savedBase = vm->baseFrameCount;
+        vm->baseFrameCount = vm->frameCount - 1;
+        InterpretResult result = run(vm);
+        vm->baseFrameCount = savedBase;
+        if (result != INTERPRET_OK) {
+            return NIL_VAL;
+        }
+        // run() left the result on the stack via OP_RETURN
+        return pop(vm);
+    }
+
+    vm->stackTop -= argCount + 1;
+    return NIL_VAL;
+}
+
 static Value mapFnNative(VM* vm, int argCount, Value* args) {
     if (argCount != 2 || !IS_LIST(args[0])) return NIL_VAL;
     ObjList* list = AS_LIST(args[0]);
@@ -642,25 +678,14 @@ static Value mapFnNative(VM* vm, int argCount, Value* args) {
     *vm->stackTop++ = OBJ_VAL(result);
 
     for (int i = 0; i < list->count; i++) {
-        // Call fn(item) - push fn, push arg, call
         *vm->stackTop++ = fn;
         *vm->stackTop++ = list->items[i];
-
-        if (!IS_CLOSURE(fn) && !IS_NATIVE(fn)) {
-            vm->stackTop -= 2;
-            continue;
+        Value res = vmCallFunction(vm, fn, 1);
+        if (vm->hasError) {
+            vm->stackTop--; // pop result protection
+            return NIL_VAL;
         }
-
-        // For native functions, call directly
-        if (IS_NATIVE(fn)) {
-            Value res = AS_NATIVE(fn)->function(vm, 1, vm->stackTop - 1);
-            vm->stackTop -= 2;
-            listAppend(vm, result, res);
-        } else {
-            // Can't easily call closures from native context
-            // For now, skip
-            vm->stackTop -= 2;
-        }
+        listAppend(vm, result, res);
     }
 
     vm->stackTop--; // pop result protection
@@ -676,11 +701,15 @@ static Value filterNative(VM* vm, int argCount, Value* args) {
     *vm->stackTop++ = OBJ_VAL(result);
 
     for (int i = 0; i < list->count; i++) {
-        if (IS_NATIVE(fn)) {
-            Value res = AS_NATIVE(fn)->function(vm, 1, &list->items[i]);
-            if (!isFalsey(res)) {
-                listAppend(vm, result, list->items[i]);
-            }
+        *vm->stackTop++ = fn;
+        *vm->stackTop++ = list->items[i];
+        Value res = vmCallFunction(vm, fn, 1);
+        if (vm->hasError) {
+            vm->stackTop--; // pop result protection
+            return NIL_VAL;
+        }
+        if (!isFalsey(res)) {
+            listAppend(vm, result, list->items[i]);
         }
     }
 
@@ -704,10 +733,11 @@ static Value reduceNative(VM* vm, int argCount, Value* args) {
     int start = argCount >= 3 ? 0 : 1;
 
     for (int i = start; i < list->count; i++) {
-        if (IS_NATIVE(fn)) {
-            Value callArgs[2] = { acc, list->items[i] };
-            acc = AS_NATIVE(fn)->function(vm, 2, callArgs);
-        }
+        *vm->stackTop++ = fn;
+        *vm->stackTop++ = acc;
+        *vm->stackTop++ = list->items[i];
+        acc = vmCallFunction(vm, fn, 2);
+        if (vm->hasError) return NIL_VAL;
     }
     return acc;
 }
@@ -801,6 +831,10 @@ void initVM(VM* vm) {
     vm->hasError = false;
     vm->currentError = NIL_VAL;
     memset(vm->globalIC, 0, sizeof(vm->globalIC));
+
+    vm->baseFrameCount = 0;
+    vm->scriptArgc = 0;
+    vm->scriptArgv = NULL;
 
     setCurrentVM(vm);
 
@@ -1463,6 +1497,11 @@ static InterpretResult run(VM* vm) {
         vm->frameCount--;
         if (vm->frameCount == 0) {
             pop(vm);
+            return INTERPRET_OK;
+        }
+        if (vm->baseFrameCount > 0 && vm->frameCount == vm->baseFrameCount) {
+            vm->stackTop = frame->slots;
+            push(vm, result);
             return INTERPRET_OK;
         }
         vm->stackTop = frame->slots;

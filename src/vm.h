@@ -66,6 +66,14 @@ struct VM {
 
     // Global variable inline cache
     GlobalICSlot globalIC[GLOBAL_IC_SIZE];
+
+    // For calling closures from native functions (run() returns when
+    // frameCount drops to baseFrameCount instead of 0)
+    int baseFrameCount;
+
+    // Script arguments (set by main, read by sys.args)
+    int scriptArgc;
+    char** scriptArgv;
 };
 
 typedef enum {
