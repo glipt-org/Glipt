@@ -1,0 +1,88 @@
+# Match statement tests
+
+# Basic value matching
+result = match 2 {
+    1 -> "one"
+    2 -> "two"
+    3 -> "three"
+    _ -> "other"
+}
+assert(result == "two")
+print("basic match: ok")
+
+# First arm match
+result = match 1 {
+    1 -> "first"
+    2 -> "second"
+    _ -> "other"
+}
+assert(result == "first")
+print("first arm: ok")
+
+# Wildcard match
+result = match 99 {
+    1 -> "one"
+    2 -> "two"
+    _ -> "other"
+}
+assert(result == "other")
+print("wildcard: ok")
+
+# String matching
+result = match "hello" {
+    "hi" -> 1
+    "hello" -> 2
+    _ -> 3
+}
+assert(result == 2)
+print("string match: ok")
+
+# Match with block bodies (statement form)
+x = 0
+match 1 {
+    1 -> { x = 10 }
+    _ -> { x = 20 }
+}
+assert(x == 10)
+print("block body: ok")
+
+# No match -> nil
+result = match 42 {
+    1 -> "one"
+    2 -> "two"
+}
+assert(result == nil)
+print("no match nil: ok")
+
+# Match with variable as subject
+val = 5
+result = match val {
+    3 -> "three"
+    5 -> "five"
+    _ -> "unknown"
+}
+assert(result == "five")
+print("variable subject: ok")
+
+# Match with boolean
+result = match true {
+    false -> "nope"
+    true -> "yes"
+}
+assert(result == "yes")
+print("bool match: ok")
+
+# Nested match
+outer = match 2 {
+    1 -> "a"
+    2 -> match "x" {
+        "x" -> "nested-x"
+        _ -> "nested-other"
+    }
+    _ -> "c"
+}
+assert(outer == "nested-x")
+print("nested match: ok")
+
+print("")
+print("ALL MATCH TESTS PASSED")

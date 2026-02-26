@@ -1,0 +1,28 @@
+# Import system tests
+
+# Basic import (name derived from path: "utils")
+import "./lib/utils"
+
+assert(utils.greeting == "hello from utils")
+assert(utils.add(3, 4) == 7)
+assert(utils.double(5) == 10)
+assert(utils.greet("World") == "Hello, World!")
+assert(utils.version == "1.0")
+print("basic import: ok")
+
+# Import with alias
+import "./lib/utils" as u
+
+assert(u.greeting == "hello from utils")
+assert(u.add(1, 2) == 3)
+assert(u.double(10) == 20)
+print("aliased import: ok")
+
+# Cached import (same path, should reuse)
+import "./lib/utils" as u2
+assert(u2.greeting == "hello from utils")
+assert(u2.add(100, 200) == 300)
+print("cached import: ok")
+
+print("")
+print("ALL IMPORT TESTS PASSED")

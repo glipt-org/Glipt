@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: make
+
+      - name: Smoke test
+        run: |
+          echo 'print("hello from glipt")' > /tmp/smoke.glipt
+          ./glipt run /tmp/smoke.glipt
+
+  build-windows:
+    name: Build & Test (windows-latest)
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc make
+
+      - name: Build
+        run: make
+
+      - name: Smoke test
+        run: |
+          echo 'print("hello from glipt")' > /tmp/smoke.glipt
+          ./glipt run /tmp/smoke.glipt

@@ -1,0 +1,25 @@
+allow exec "*"
+allow read "*"
+
+# Real-world task: Check git status, run tests, build
+print("=== Deployment Check ===")
+
+# Git status
+result = exec "git status --short"
+if result.code != 0 {
+    print("Git check failed")
+}
+
+# Run "tests" (simulated with true)
+print("Running tests...")
+test_result = exec "true"
+if test_result.code == 0 {
+    print("✓ Tests passed")
+}
+
+# Build (simulated)
+print("Building...")
+build_result = exec "echo 'Build complete'"
+print(build_result.stdout)
+
+print("=== Done ===")

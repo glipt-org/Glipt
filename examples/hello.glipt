@@ -1,0 +1,50 @@
+# Hello Glipt!
+print("Hello, World!")
+
+# Variables
+name = "Glipt"
+version = 1.0
+
+# Arithmetic
+result = 1 + 2 * 3
+
+# Permissions
+allow exec "echo"
+allow net "api.example.com"
+
+# Function
+fn greet(who) {
+    print("Hello, " + who)
+}
+
+# Control flow
+if result > 5 {
+    print("big")
+} else {
+    print("small")
+}
+
+# Parallel
+parallel {
+    build()
+    test()
+    lint()
+}
+
+# Error handling
+on failure {
+    exit "Build failed"
+}
+
+# Lists and maps
+items = [1, 2, 3]
+config = {"name": "glipt", "version": 1}
+
+# For loop
+for item in items {
+    print(item)
+}
+
+# Exec
+exec "echo hello"
+`git status`

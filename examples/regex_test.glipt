@@ -1,0 +1,70 @@
+# Regex module tests
+
+# re.match - full match check
+assert(re.match("^hello$", "hello") == true)
+assert(re.match("^hello$", "hello world") == false)
+assert(re.match("[0-9]+", "abc123") == true)
+assert(re.match("^[a-z]+$", "hello") == true)
+assert(re.match("^[a-z]+$", "Hello") == false)
+print("re.match: ok")
+
+# re.search - find first match with position
+result = re.search("[0-9]+", "abc123def")
+assert(result.matched == "123")
+assert(result.start == 3)
+assert(result.end == 6)
+
+result = re.search("[A-Z][a-z]+", "hello World test")
+assert(result.matched == "World")
+assert(result.start == 6)
+
+# No match returns nil
+result = re.search("[0-9]+", "no numbers here")
+assert(result == nil)
+print("re.search: ok")
+
+# re.find_all - find all matches
+all = re.find_all("[0-9]+", "a1b22c333")
+assert(len(all) == 3)
+assert(all[0] == "1")
+assert(all[1] == "22")
+assert(all[2] == "333")
+
+words = re.find_all("[a-z]+", "Hello World Foo")
+assert(len(words) == 3)
+assert(words[0] == "ello")
+
+# Empty result
+none = re.find_all("[0-9]+", "no numbers")
+assert(len(none) == 0)
+print("re.find_all: ok")
+
+# re.replace - replace all matches
+replaced = re.replace("[0-9]+", "a1b2c3", "X")
+assert(replaced == "aXbXcX")
+
+replaced = re.replace("[[:space:]]+", "hello   world", " ")
+assert(replaced == "hello world")
+
+# No match - string unchanged
+same = re.replace("[0-9]+", "no numbers", "X")
+assert(same == "no numbers")
+print("re.replace: ok")
+
+# re.split - split string by pattern
+parts = re.split("[,;]", "a,b;c,d")
+assert(len(parts) == 4)
+assert(parts[0] == "a")
+assert(parts[1] == "b")
+assert(parts[2] == "c")
+assert(parts[3] == "d")
+
+parts = re.split("[[:space:]]+", "hello   world   test")
+assert(len(parts) == 3)
+assert(parts[0] == "hello")
+assert(parts[1] == "world")
+assert(parts[2] == "test")
+print("re.split: ok")
+
+print("")
+print("ALL REGEX TESTS PASSED")

@@ -1,0 +1,137 @@
+# Glipt Full Feature Test
+# Expected output is listed after each print
+
+# --- Permissions ---
+allow exec "echo*"
+allow exec "true"
+allow exec "false"
+allow exec "ls*"
+allow read "*"
+allow write "/tmp/*"
+allow env "*"
+
+# === MILESTONE 1: Basic Types ===
+print(1 + 2 * 3)           # 7
+print("Hello, " + "Glipt!") # Hello, Glipt!
+print(true)                 # true
+print(nil)                  # nil
+print(len([1,2,3]))         # 3
+
+# List operations
+nums = [10, 20, 30]
+append(nums, 40)
+print(nums[3])              # 40
+
+# Map operations
+m = {"a": 1, "b": 2}
+print(m["a"])               # 1
+print(m.b)                  # 2
+
+# === MILESTONE 2: Functions & Control Flow ===
+
+# Functions
+fn greet(name) {
+    return "Hi " + name
+}
+print(greet("World"))       # Hi World
+
+# Recursion (fibonacci)
+fn fib(n) {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+print(fib(10))              # 55
+
+# Closures
+fn counter() {
+    count = 0
+    return fn() {
+        count = count + 1
+        return count
+    }
+}
+c = counter()
+c()
+c()
+print(c())                  # 3
+
+# For loop
+total = 0
+for x in [1, 2, 3, 4, 5] {
+    total = total + x
+}
+print(total)                # 15
+
+# While loop
+n = 1
+while n < 100 {
+    n = n * 2
+}
+print(n)                    # 128
+
+# If/else
+fn abs(x) {
+    if x < 0 { return -x }
+    return x
+}
+print(abs(-42))             # 42
+
+# === MILESTONE 3: Glipt Features ===
+
+# Process execution
+result = exec("echo Glipt works")
+print(result["output"])     # Glipt works
+print(result["exitCode"])   # 0
+
+# JSON
+data = parse_json('{"lang": "glipt", "ver": 1}')
+print(data["lang"])         # glipt
+print(to_json(data))        # {"lang":"glipt","ver":1}
+
+# String functions
+print(upper("hello"))       # HELLO
+print(lower("WORLD"))       # world
+print(trim("  hi  "))       # hi
+print(replace("foo bar", "bar", "baz")) # foo baz
+parts = split("a,b,c", ",")
+print(join(parts, "-"))     # a-b-c
+print(starts_with("hello", "hel"))  # true
+print(ends_with("hello", "xyz"))    # false
+
+# Type conversions
+print(num("3.14"))          # 3.14
+print(str(42))              # 42
+print(bool(0))              # false
+print(bool("yes"))          # true
+print(type([]))             # list
+
+# Format
+print(format("Hello {} you are {} years old", "Alice", 30))  # Hello Alice you are 30 years old
+
+# File I/O
+write("/tmp/glipt_test2.txt", "test data")
+print(read("/tmp/glipt_test2.txt"))  # test data
+
+# Environment
+home = env("HOME")
+print(type(home))           # string
+
+# List higher-order
+sorted = [5, 3, 1, 4, 2]
+sort(sorted)
+print(join(sorted, ","))    # 1,2,3,4,5
+
+# Error handling - use a function to scope the handler
+fn test_error() {
+    on failure {
+        print("caught: " + error["type"])
+    }
+    exec("false")
+}
+test_error()
+
+# Parallel exec
+results = parallel_exec(["echo A", "echo B", "echo C"])
+print(len(results))         # 3
+
+print("ALL TESTS PASSED")

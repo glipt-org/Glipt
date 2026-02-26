@@ -1,0 +1,168 @@
+# Glipt Standard Library Module Tests
+allow exec "*"
+allow read "*"
+allow write "/tmp/*"
+
+# ============================================
+# fs module
+# ============================================
+
+# fs.exists
+assert(fs.exists("/tmp") == true)
+assert(fs.exists("/nonexistent_path_xyz") == false)
+print("fs.exists: ok")
+
+# fs.isdir / fs.isfile
+assert(fs.isdir("/tmp") == true)
+assert(fs.isfile("/tmp") == false)
+print("fs.isdir/isfile: ok")
+
+# fs.mkdir / fs.rmdir
+result = fs.mkdir("/tmp/glipt_test_dir")
+assert(result == true)
+assert(fs.isdir("/tmp/glipt_test_dir") == true)
+fs.rmdir("/tmp/glipt_test_dir")
+assert(fs.exists("/tmp/glipt_test_dir") == false)
+print("fs.mkdir/rmdir: ok")
+
+# fs.list
+files = fs.list("/tmp")
+assert(type(files) == "list")
+print("fs.list: ok")
+
+# fs.stat
+info = fs.stat("/tmp")
+assert(info.isDir == true)
+assert(info.size >= 0)
+print("fs.stat: ok")
+
+# fs.size
+write("/tmp/glipt_size_test.txt", "hello")
+sz = fs.size("/tmp/glipt_size_test.txt")
+assert(sz == 5)
+fs.remove("/tmp/glipt_size_test.txt")
+print("fs.size: ok")
+
+# fs.join
+p = fs.join("/usr", "local", "bin")
+assert(p == "/usr/local/bin")
+print("fs.join: ok")
+
+# fs.dirname / fs.basename / fs.extname
+assert(fs.dirname("/usr/local/bin/glipt") == "/usr/local/bin")
+assert(fs.basename("/usr/local/bin/glipt") == "glipt")
+assert(fs.extname("script.glipt") == ".glipt")
+assert(fs.extname("noext") == "")
+print("fs.dirname/basename/extname: ok")
+
+# fs.absolute
+abs = fs.absolute(".")
+assert(len(abs) > 0)
+print("fs.absolute: ok")
+
+# fs.copy / fs.move / fs.remove
+write("/tmp/glipt_copy_src.txt", "copy me")
+fs.copy("/tmp/glipt_copy_src.txt", "/tmp/glipt_copy_dst.txt")
+assert(fs.exists("/tmp/glipt_copy_dst.txt") == true)
+assert(read("/tmp/glipt_copy_dst.txt") == "copy me")
+
+fs.move("/tmp/glipt_copy_dst.txt", "/tmp/glipt_moved.txt")
+assert(fs.exists("/tmp/glipt_copy_dst.txt") == false)
+assert(fs.exists("/tmp/glipt_moved.txt") == true)
+
+fs.remove("/tmp/glipt_copy_src.txt")
+fs.remove("/tmp/glipt_moved.txt")
+print("fs.copy/move/remove: ok")
+
+# ============================================
+# proc module
+# ============================================
+
+# proc.exec
+result = proc.exec("echo hello")
+assert(result.output == "hello")
+assert(result.code == 0)
+print("proc.exec: ok")
+
+# proc.pid
+pid = proc.pid()
+assert(pid > 0)
+print("proc.pid: ok")
+
+# proc.running
+assert(proc.running(proc.pid()) == true)
+assert(proc.running(999999) == false)
+print("proc.running: ok")
+
+# proc.sleep
+proc.sleep(0.01)
+print("proc.sleep: ok")
+
+# ============================================
+# sys module
+# ============================================
+
+# sys.pid
+assert(sys.pid() > 0)
+print("sys.pid: ok")
+
+# sys.ppid
+assert(sys.ppid() > 0)
+print("sys.ppid: ok")
+
+# sys.hostname
+h = sys.hostname()
+assert(type(h) == "string")
+assert(len(h) > 0)
+print("sys.hostname: ok")
+
+# sys.username
+u = sys.username()
+assert(type(u) == "string")
+assert(len(u) > 0)
+print("sys.username: ok")
+
+# sys.platform
+plat = sys.platform()
+assert(plat == "darwin" or plat == "linux")
+print("sys.platform: ok (" + plat + ")")
+
+# sys.arch
+arch = sys.arch()
+assert(type(arch) == "string")
+print("sys.arch: ok (" + arch + ")")
+
+# sys.cpu_count
+cpus = sys.cpu_count()
+assert(cpus >= 1)
+print("sys.cpu_count: ok (" + str(cpus) + ")")
+
+# sys.time
+t = sys.time()
+assert(t > 1000000000)
+print("sys.time: ok")
+
+# sys.clock
+c = sys.clock()
+assert(c > 0)
+print("sys.clock: ok")
+
+# sys.cwd
+cwd = sys.cwd()
+assert(type(cwd) == "string")
+assert(len(cwd) > 0)
+print("sys.cwd: ok")
+
+# ============================================
+# net module (basic DNS test only - no HTTP server to test against)
+# ============================================
+allow net "*"
+
+addrs = net.resolve("localhost")
+assert(type(addrs) == "list")
+assert(len(addrs) > 0)
+print("net.resolve: ok")
+
+# ============================================
+print("")
+print("ALL STDLIB TESTS PASSED")

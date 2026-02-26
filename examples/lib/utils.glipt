@@ -1,0 +1,17 @@
+# Utility module for import testing
+
+greeting = "hello from utils"
+
+fn add(a, b) {
+    return a + b
+}
+
+fn double(x) {
+    return x * 2
+}
+
+fn greet(name) {
+    return "Hello, " + name + "!"
+}
+
+version = "1.0"

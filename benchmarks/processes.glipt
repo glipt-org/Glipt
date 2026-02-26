@@ -1,0 +1,9 @@
+allow exec "*"
+
+# Run 100 simple commands
+i = 0
+while i < 100 {
+    exec "echo test"
+    i = i + 1
+}
+print("Done: 100 processes")

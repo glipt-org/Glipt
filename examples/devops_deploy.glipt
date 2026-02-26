@@ -1,0 +1,142 @@
+# DevOps Deployment Script Example
+# Demonstrates: permissions, error handling, parallel execution, JSON, process control
+
+allow exec "git*"
+allow exec "docker*"
+allow exec "kubectl*"
+allow exec "curl*"
+allow read "deploy-config.json"
+allow write "logs/*"
+allow env "DOCKER_REGISTRY"
+allow env "KUBE_NAMESPACE"
+
+# Load configuration
+config = parse_json('{
+    "app": "myapp",
+    "version": "1.0.0",
+    "replicas": 3,
+    "healthcheck": "/health",
+    "timeout": 30
+}')
+
+app_name = config["app"]
+version = config["version"]
+registry = env("DOCKER_REGISTRY")
+namespace = env("KUBE_NAMESPACE")
+
+print(format("🚀 Deploying {} version {}", app_name, version))
+
+# Global error handler
+on failure {
+    print("❌ Deployment failed!")
+    print("Error: " + error["message"])
+    print("Type: " + error["type"])
+
+    # Rollback
+    print("🔄 Rolling back...")
+    exec("kubectl rollout undo deployment/" + app_name + " -n " + namespace)
+
+    write("logs/deploy-failure.log", format(
+        "Failed at: {}\nError: {}\nType: {}\n",
+        str(clock()),
+        error["message"],
+        error["type"]
+    ))
+
+    exit(1)
+}
+
+# Pre-flight checks
+print("✓ Checking git status...")
+git_status = exec("git status --porcelain")
+assert(git_status["output"] == "", "Working directory not clean")
+
+print("✓ Checking Docker daemon...")
+exec("docker info")
+
+print("✓ Checking Kubernetes connection...")
+exec("kubectl cluster-info")
+
+# Build and push in parallel
+print("📦 Building and pushing Docker image...")
+image_tag = registry + "/" + app_name + ":" + version
+
+build_commands = [
+    "docker build -t " + image_tag + " .",
+    "docker tag " + image_tag + " " + registry + "/" + app_name + ":latest"
+]
+
+# Run builds sequentially (can't parallelize)
+for cmd in build_commands {
+    result = exec(cmd)
+    assert(result["exitCode"] == 0, "Build failed")
+}
+
+# Push both tags in parallel
+push_results = parallel_exec([
+    "docker push " + image_tag,
+    "docker push " + registry + "/" + app_name + ":latest"
+])
+
+for result in push_results {
+    assert(result["exitCode"] == 0, "Push failed")
+}
+
+# Deploy to Kubernetes
+print("☸️  Deploying to Kubernetes...")
+exec("kubectl set image deployment/" + app_name + " " + app_name + "=" + image_tag + " -n " + namespace)
+exec("kubectl rollout status deployment/" + app_name + " -n " + namespace + " --timeout=" + str(config["timeout"]) + "s")
+
+# Wait for pods to be ready
+print("⏳ Waiting for pods...")
+sleep(5)
+
+# Get pod names
+pods_output = exec("kubectl get pods -n " + namespace + " -l app=" + app_name + " -o jsonpath='{.items[*].metadata.name}'")
+pod_names = split(trim(pods_output["output"]), " ")
+
+print(format("✓ Found {} pods", len(pod_names)))
+
+# Health check all pods in parallel
+print("🏥 Running health checks...")
+health_checks = []
+for pod in pod_names {
+    cmd = "kubectl exec " + pod + " -n " + namespace + " -- curl -f http://localhost:8080" + config["healthcheck"]
+    append(health_checks, cmd)
+}
+
+health_results = parallel_exec(health_checks)
+
+# Verify all health checks passed
+healthy_count = 0
+for result in health_results {
+    if result["exitCode"] == 0 {
+        healthy_count = healthy_count + 1
+    }
+}
+
+assert(healthy_count == len(pod_names), format("Only {}/{} pods healthy", healthy_count, len(pod_names)))
+
+# Success logging
+print("✅ Deployment successful!")
+
+log_entry = format(
+    "Deployment Log\n" +
+    "==============\n" +
+    "App: {}\n" +
+    "Version: {}\n" +
+    "Image: {}\n" +
+    "Pods: {}\n" +
+    "Health Checks: {}/{} passed\n" +
+    "Timestamp: {}\n",
+    app_name,
+    version,
+    image_tag,
+    len(pod_names),
+    healthy_count,
+    len(pod_names),
+    str(clock())
+)
+
+write("logs/deploy-" + version + ".log", log_entry)
+print(log_entry)
