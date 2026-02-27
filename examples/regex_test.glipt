@@ -66,5 +66,31 @@ assert(parts[1] == "world")
 assert(parts[2] == "test")
 print("re.split: ok")
 
+# re.search - capture groups
+result = re.search("([a-z]+)=([0-9]+)", "key=42")
+assert(result.matched == "key=42")
+assert(result.groups[0] == "key")
+assert(result.groups[1] == "42")
+assert(len(result.groups) == 2)
+
+# Nested groups
+result = re.search("((ab)(cd))", "xabcdy")
+assert(result.matched == "abcd")
+assert(result.groups[0] == "abcd")
+assert(result.groups[1] == "ab")
+assert(result.groups[2] == "cd")
+
+# No groups - no groups key
+result = re.search("[0-9]+", "abc123")
+assert(result.matched == "123")
+
+# Real-world: parse a URL-like pattern
+result = re.search("([a-z]+)://([^/]+)(.*)", "http://example.com/path")
+assert(result.groups[0] == "http")
+assert(result.groups[1] == "example.com")
+assert(result.groups[2] == "/path")
+
+print("re.search groups: ok")
+
 print("")
 print("ALL REGEX TESTS PASSED")

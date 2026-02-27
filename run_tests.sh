@@ -53,6 +53,11 @@ run_test examples/regex_test.glipt
 run_test examples/match_test.glipt
 run_test examples/import_test.glipt
 
+# Phase 3 tests
+echo ""
+echo "Phase 3:"
+run_test examples/phase3_test.glipt
+
 # Summary
 echo ""
 echo "---"

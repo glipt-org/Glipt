@@ -78,22 +78,49 @@ static Value mathExpNative(VM* vm, int argCount, Value* args) {
     return NUMBER_VAL(exp(AS_NUMBER(args[0])));
 }
 
-// ---- Min / Max ----
+static Value mathLog2Native(VM* vm, int argCount, Value* args) {
+    (void)vm; (void)argCount;
+    if (!IS_NUMBER(args[0])) return NIL_VAL;
+    return NUMBER_VAL(log2(AS_NUMBER(args[0])));
+}
+
+static Value mathTruncNative(VM* vm, int argCount, Value* args) {
+    (void)vm; (void)argCount;
+    if (!IS_NUMBER(args[0])) return NIL_VAL;
+    return NUMBER_VAL(trunc(AS_NUMBER(args[0])));
+}
+
+static Value mathSignNative(VM* vm, int argCount, Value* args) {
+    (void)vm; (void)argCount;
+    if (!IS_NUMBER(args[0])) return NIL_VAL;
+    double x = AS_NUMBER(args[0]);
+    return NUMBER_VAL(x > 0 ? 1.0 : x < 0 ? -1.0 : 0.0);
+}
+
+// ---- Min / Max (variadic) ----
 
 static Value mathMinNative(VM* vm, int argCount, Value* args) {
-    (void)vm; (void)argCount;
-    if (!IS_NUMBER(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
-    double a = AS_NUMBER(args[0]);
-    double b = AS_NUMBER(args[1]);
-    return NUMBER_VAL(a < b ? a : b);
+    (void)vm;
+    if (argCount < 1 || !IS_NUMBER(args[0])) return NIL_VAL;
+    double result = AS_NUMBER(args[0]);
+    for (int i = 1; i < argCount; i++) {
+        if (!IS_NUMBER(args[i])) return NIL_VAL;
+        double v = AS_NUMBER(args[i]);
+        if (v < result) result = v;
+    }
+    return NUMBER_VAL(result);
 }
 
 static Value mathMaxNative(VM* vm, int argCount, Value* args) {
-    (void)vm; (void)argCount;
-    if (!IS_NUMBER(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
-    double a = AS_NUMBER(args[0]);
-    double b = AS_NUMBER(args[1]);
-    return NUMBER_VAL(a > b ? a : b);
+    (void)vm;
+    if (argCount < 1 || !IS_NUMBER(args[0])) return NIL_VAL;
+    double result = AS_NUMBER(args[0]);
+    for (int i = 1; i < argCount; i++) {
+        if (!IS_NUMBER(args[i])) return NIL_VAL;
+        double v = AS_NUMBER(args[i]);
+        if (v > result) result = v;
+    }
+    return NUMBER_VAL(result);
 }
 
 // ---- Trigonometry ----
@@ -174,10 +201,13 @@ void registerMathModule(VM* vm) {
     defineModuleNative(vm, mathMod, "log", mathLogNative, 1);
     defineModuleNative(vm, mathMod, "log10", mathLog10Native, 1);
     defineModuleNative(vm, mathMod, "exp", mathExpNative, 1);
+    defineModuleNative(vm, mathMod, "log2", mathLog2Native, 1);
+    defineModuleNative(vm, mathMod, "trunc", mathTruncNative, 1);
+    defineModuleNative(vm, mathMod, "sign", mathSignNative, 1);
 
-    // Min / Max
-    defineModuleNative(vm, mathMod, "min", mathMinNative, 2);
-    defineModuleNative(vm, mathMod, "max", mathMaxNative, 2);
+    // Min / Max (variadic)
+    defineModuleNative(vm, mathMod, "min", mathMinNative, -1);
+    defineModuleNative(vm, mathMod, "max", mathMaxNative, -1);
 
     // Trigonometry
     defineModuleNative(vm, mathMod, "sin", mathSinNative, 1);

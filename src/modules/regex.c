@@ -53,15 +53,23 @@ static Value reSearchNative(VM* vm, int argCount, Value* args) {
         return NIL_VAL;
     }
 
-    regmatch_t match;
-    if (regexec(&reg, str, 1, &match, 0) != 0) {
+    // Allocate space for full match + capture groups
+    size_t ngroups = reg.re_nsub + 1;
+    regmatch_t* matches = (regmatch_t*)malloc(sizeof(regmatch_t) * ngroups);
+    if (matches == NULL) {
+        regfree(&reg);
+        vmRaiseError(vm, "Out of memory", "io");
+        return NIL_VAL;
+    }
+
+    if (regexec(&reg, str, ngroups, matches, 0) != 0) {
+        free(matches);
         regfree(&reg);
         return NIL_VAL;
     }
-    regfree(&reg);
 
-    int start = (int)match.rm_so;
-    int end = (int)match.rm_eo;
+    int start = (int)matches[0].rm_so;
+    int end = (int)matches[0].rm_eo;
 
     ObjMap* result = newMap(vm);
     vmPush(vm, OBJ_VAL(result));
@@ -76,7 +84,30 @@ static Value reSearchNative(VM* vm, int argCount, Value* args) {
     ObjString* endKey = copyString(vm, "end", 3);
     tableSet(&result->table, endKey, NUMBER_VAL((double)end));
 
-    vmPop(vm);
+    // Build capture groups list
+    if (reg.re_nsub > 0) {
+        ObjList* groups = newList(vm);
+        vmPush(vm, OBJ_VAL(groups)); // GC protect
+
+        for (size_t i = 1; i < ngroups; i++) {
+            if (matches[i].rm_so == -1) {
+                listAppend(vm, groups, NIL_VAL);
+            } else {
+                int gs = (int)matches[i].rm_so;
+                int ge = (int)matches[i].rm_eo;
+                ObjString* group = copyString(vm, str + gs, ge - gs);
+                listAppend(vm, groups, OBJ_VAL(group));
+            }
+        }
+
+        vmPop(vm); // groups
+        ObjString* groupsKey = copyString(vm, "groups", 6);
+        tableSet(&result->table, groupsKey, OBJ_VAL(groups));
+    }
+
+    free(matches);
+    regfree(&reg);
+    vmPop(vm); // result
     return OBJ_VAL(result);
 }
 

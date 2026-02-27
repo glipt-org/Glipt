@@ -240,7 +240,7 @@ write("output.json", to_json(payload))
 
 ```glipt
 on failure {
-    print(f"Failed: {error["message"]} (type: {error["type"]})")
+    print(f"Failed: {error["message"]} (type: {error["type"]}, line: {error["line"]})")
     exec("rollback.sh")
     exit(1)
 }
@@ -289,13 +289,19 @@ print(math.PI)                  # 3.14159...
 print(math.sqrt(144))           # 12
 print(math.pow(2, 10))          # 1024
 print(math.round(3.7))          # 4
-print(math.min(5, 3))           # 3
+print(math.min(1, 5, 3, 2))    # 1  (variadic)
+print(math.max(1, 5, 3, 2))    # 5  (variadic)
+print(math.log2(1024))          # 10
+print(math.trunc(3.9))          # 3
+print(math.sign(-5))            # -1
 print(math.sin(math.PI / 2))    # 1
 print(math.rand())              # random float 0..1
 print(math.rand_int(1, 100))    # random int 1..100
 ```
 
-Functions: `floor`, `ceil`, `round`, `abs`, `sqrt`, `pow`, `log`, `log10`, `exp`, `min`, `max`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `rand`, `rand_int`
+Functions: `floor`, `ceil`, `round`, `abs`, `sqrt`, `pow`, `log`, `log10`, `log2`, `exp`, `min`, `max`, `sign`, `trunc`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `rand`, `rand_int`
+
+`min` and `max` accept any number of arguments: `math.min(a, b, c, ...)`.
 
 Constants: `PI`, `E`, `INF`, `NAN`
 
@@ -311,6 +317,11 @@ re.match("^[0-9]+$", "12345")   # true
 m = re.search("[0-9]+", "abc123def")
 print(m["matched"])  # "123"
 print(m["start"])    # 3
+
+# Capture groups — returned as m["groups"] list
+m = re.search("([a-z]+)=([0-9]+)", "key=42")
+print(m["groups"][0])  # "key"
+print(m["groups"][1])  # "42"
 
 # All matches
 nums = re.find_all("[0-9]+", "a1b22c333")
@@ -387,19 +398,36 @@ sys.time()       # Unix timestamp
 sys.args()       # script arguments as list
 ```
 
+### `bit` (Bitwise Operations)
+
+Integer bitwise operations via a module (all values are treated as 32-bit unsigned integers):
+
+```glipt
+print(bit.and(0b1100, 0b1010))    # 8   (0b1000)
+print(bit.or(0b1100, 0b1010))     # 14  (0b1110)
+print(bit.xor(0b1100, 0b1010))    # 6   (0b0110)
+print(bit.not(0))                 # 4294967295
+print(bit.lshift(1, 4))           # 16
+print(bit.rshift(256, 4))         # 16
+```
+
+Functions: `and`, `or`, `xor`, `not`, `lshift`, `rshift`
+
 ---
 
 ## Built-in Functions
 
 **I/O**: `print(...)`, `println(...)`, `input(prompt?)`, `read(path)`, `write(path, content)`
 
-**Strings**: `split(str, delim)`, `join(list, sep)`, `trim(str)`, `replace(str, old, new)`, `upper(str)`, `lower(str)`, `starts_with(str, prefix)`, `ends_with(str, suffix)`, `format(fmt, ...)`
+**Strings**: `split(str, delim)`, `join(list, sep)`, `trim(str)`, `replace(str, old, new)`, `upper(str)`, `lower(str)`, `starts_with(str, prefix)`, `ends_with(str, suffix)`, `format(fmt, ...)`, `substr(str, start, end?)`, `index_of(str, sub)`, `repeat(str, n)`, `reverse(str)`, `lstrip(str)`, `rstrip(str)`, `char_at(str, i)`, `pad_start(str, len, fill?)`, `pad_end(str, len, fill?)`, `count(str, sub)`, `capitalize(str)`
 
-**Collections**: `len(x)`, `append(list, item)`, `pop(list)`, `sort(list)`, `keys(map)`, `values(map)`, `contains(x, item)`, `range(start, stop, step?)`, `map_fn(list, fn)`, `filter(list, fn)`, `reduce(list, fn, init?)`
+**Type checks**: `is_number(str)`, `is_alpha(str)`
+
+**Collections**: `len(x)`, `append(list, item)`, `pop(list)`, `sort(list, fn?)`, `keys(map)`, `values(map)`, `contains(x, item)`, `range(start, stop, step?)`, `map_fn(list, fn)`, `filter(list, fn)`, `reduce(list, fn, init?)`, `slice(list, start, end?)`, `insert(list, i, item)`, `find(list, item)`, `remove(list, i)`, `sum(list)`, `unique(list)`, `reverse(list)`
 
 **Types**: `type(x)`, `str(x)`, `num(x)`, `bool(x)`
 
-**Process & System**: `exec(cmd)`, `parallel_exec([cmd, ...])`, `env(name)`, `sleep(seconds)`, `exit(code?)`
+**Process & System**: `exec(cmd)`, `parallel_exec([cmd, ...])`, `env(name, default?)`, `sleep(seconds)`, `exit(code?)`
 
 **Data**: `parse_json(str)`, `to_json(value)`
 
@@ -559,11 +587,11 @@ make clean        # Remove build artifacts
 ## Testing
 
 ```bash
-./run_tests.sh     # Run all 11 test suites
+./run_tests.sh     # Run all 12 test suites
 make test          # Build first, then run
 ```
 
-**Test suites (11 total):**
+**Test suites (12 total):**
 - `milestone1.glipt` — Basic types, arithmetic, strings, lists, maps
 - `milestone2.glipt` — Functions, recursion, closures, loops, if/else
 - `milestone3.glipt` — Process execution, JSON, files, env, error handling
@@ -572,9 +600,10 @@ make test          # Build first, then run
 - `parallel_test.glipt` — Concurrent execution
 - `stdlib_test.glipt` — fs, proc, net, sys modules
 - `math_test.glipt` — math module
-- `regex_test.glipt` — re module
+- `regex_test.glipt` — re module (including capture groups)
 - `match_test.glipt` — Match expressions
 - `import_test.glipt` — Import system
+- `phase3_test.glipt` — String/list builtins, bit module, range values, sort comparators, type checks
 
 ---
 

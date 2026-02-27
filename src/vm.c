@@ -18,6 +18,7 @@
 #include "modules/sys.h"
 #include "modules/math_module.h"
 #include "modules/regex.h"
+#include "modules/bit_module.h"
 
 #include <stdarg.h>
 #include <math.h>
@@ -39,6 +40,7 @@ static inline void push(VM* vm, Value value);
 static inline Value pop(VM* vm);
 static void runtimeError(VM* vm, const char* format, ...);
 static void raiseError(VM* vm, const char* message, const char* type);
+static Value vmCallFunction(VM* vm, Value callee, int argCount);
 
 // ---- Native Functions ----
 
@@ -433,7 +435,7 @@ static Value writeFileNative(VM* vm, int argCount, Value* args) {
 }
 
 static Value envNative(VM* vm, int argCount, Value* args) {
-    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+    if (argCount < 1 || !IS_STRING(args[0])) return NIL_VAL;
 
     const char* name = AS_CSTRING(args[0]);
     if (!hasPermission(&vm->permissions, PERM_ENV, name)) {
@@ -444,7 +446,10 @@ static Value envNative(VM* vm, int argCount, Value* args) {
     }
 
     const char* val = getenv(name);
-    if (val == NULL) return NIL_VAL;
+    if (val == NULL) {
+        if (argCount >= 2) return args[1];
+        return NIL_VAL;
+    }
     return OBJ_VAL(copyString(vm, val, (int)strlen(val)));
 }
 
@@ -608,6 +613,293 @@ static Value endsWithNative(VM* vm, int argCount, Value* args) {
                             suffix->chars, suffix->length) == 0);
 }
 
+// ---- Extended String Functions ----
+
+static Value substrNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 2 || !IS_STRING(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    int start = (int)AS_NUMBER(args[1]);
+    if (start < 0) start += str->length;
+    if (start < 0) start = 0;
+    if (start >= str->length) return OBJ_VAL(copyString(vm, "", 0));
+    int len = str->length - start;
+    if (argCount >= 3 && IS_NUMBER(args[2])) {
+        len = (int)AS_NUMBER(args[2]);
+        if (len < 0) len = 0;
+    }
+    if (start + len > str->length) len = str->length - start;
+    return OBJ_VAL(copyString(vm, str->chars + start, len));
+}
+
+static Value indexOfNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 2 || !IS_STRING(args[0]) || !IS_STRING(args[1])) return NUMBER_VAL(-1);
+    ObjString* str = AS_STRING(args[0]);
+    ObjString* search = AS_STRING(args[1]);
+    const char* pos = strstr(str->chars, search->chars);
+    if (pos == NULL) return NUMBER_VAL(-1);
+    return NUMBER_VAL((double)(pos - str->chars));
+}
+
+static Value repeatNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 2 || !IS_STRING(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    int count = (int)AS_NUMBER(args[1]);
+    if (count <= 0) return OBJ_VAL(copyString(vm, "", 0));
+    int newLen = str->length * count;
+    char* buf = (char*)malloc(newLen + 1);
+    if (buf == NULL) return NIL_VAL;
+    for (int i = 0; i < count; i++) {
+        memcpy(buf + i * str->length, str->chars, str->length);
+    }
+    buf[newLen] = '\0';
+    ObjString* result = copyString(vm, buf, newLen);
+    free(buf);
+    return OBJ_VAL(result);
+}
+
+static Value reverseNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1) return NIL_VAL;
+    if (IS_STRING(args[0])) {
+        ObjString* str = AS_STRING(args[0]);
+        char* buf = (char*)malloc(str->length + 1);
+        if (buf == NULL) return NIL_VAL;
+        for (int i = 0; i < str->length; i++) {
+            buf[i] = str->chars[str->length - 1 - i];
+        }
+        buf[str->length] = '\0';
+        ObjString* result = copyString(vm, buf, str->length);
+        free(buf);
+        return OBJ_VAL(result);
+    }
+    if (IS_LIST(args[0])) {
+        ObjList* list = AS_LIST(args[0]);
+        for (int i = 0, j = list->count - 1; i < j; i++, j--) {
+            Value tmp = list->items[i];
+            list->items[i] = list->items[j];
+            list->items[j] = tmp;
+        }
+        return args[0];
+    }
+    return NIL_VAL;
+}
+
+static Value lstripNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    int start = 0;
+    while (start < str->length && (str->chars[start] == ' ' || str->chars[start] == '\t' ||
+           str->chars[start] == '\n' || str->chars[start] == '\r')) start++;
+    return OBJ_VAL(copyString(vm, str->chars + start, str->length - start));
+}
+
+static Value rstripNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    int end = str->length;
+    while (end > 0 && (str->chars[end-1] == ' ' || str->chars[end-1] == '\t' ||
+           str->chars[end-1] == '\n' || str->chars[end-1] == '\r')) end--;
+    return OBJ_VAL(copyString(vm, str->chars, end));
+}
+
+static Value charAtNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 2 || !IS_STRING(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    int index = (int)AS_NUMBER(args[1]);
+    if (index < 0) index += str->length;
+    if (index < 0 || index >= str->length) return NIL_VAL;
+    return OBJ_VAL(copyString(vm, &str->chars[index], 1));
+}
+
+static Value padStartNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 2 || !IS_STRING(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    int targetLen = (int)AS_NUMBER(args[1]);
+    if (targetLen <= str->length) return args[0];
+    char fill = ' ';
+    if (argCount >= 3 && IS_STRING(args[2]) && AS_STRING(args[2])->length > 0) {
+        fill = AS_STRING(args[2])->chars[0];
+    }
+    int padLen = targetLen - str->length;
+    char* buf = (char*)malloc(targetLen + 1);
+    if (buf == NULL) return NIL_VAL;
+    memset(buf, fill, padLen);
+    memcpy(buf + padLen, str->chars, str->length);
+    buf[targetLen] = '\0';
+    ObjString* result = copyString(vm, buf, targetLen);
+    free(buf);
+    return OBJ_VAL(result);
+}
+
+static Value padEndNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 2 || !IS_STRING(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    int targetLen = (int)AS_NUMBER(args[1]);
+    if (targetLen <= str->length) return args[0];
+    char fill = ' ';
+    if (argCount >= 3 && IS_STRING(args[2]) && AS_STRING(args[2])->length > 0) {
+        fill = AS_STRING(args[2])->chars[0];
+    }
+    char* buf = (char*)malloc(targetLen + 1);
+    if (buf == NULL) return NIL_VAL;
+    memcpy(buf, str->chars, str->length);
+    memset(buf + str->length, fill, targetLen - str->length);
+    buf[targetLen] = '\0';
+    ObjString* result = copyString(vm, buf, targetLen);
+    free(buf);
+    return OBJ_VAL(result);
+}
+
+static Value countNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 2 || !IS_STRING(args[0]) || !IS_STRING(args[1])) return NUMBER_VAL(0);
+    ObjString* str = AS_STRING(args[0]);
+    ObjString* sub = AS_STRING(args[1]);
+    if (sub->length == 0) return NUMBER_VAL(0);
+    int count = 0;
+    const char* pos = str->chars;
+    while ((pos = strstr(pos, sub->chars)) != NULL) {
+        count++;
+        pos += sub->length;
+    }
+    return NUMBER_VAL((double)count);
+}
+
+static Value capitalizeNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_STRING(args[0])) return NIL_VAL;
+    ObjString* str = AS_STRING(args[0]);
+    if (str->length == 0) return args[0];
+    char* buf = (char*)malloc(str->length + 1);
+    if (buf == NULL) return NIL_VAL;
+    buf[0] = (char)toupper((unsigned char)str->chars[0]);
+    for (int i = 1; i < str->length; i++) {
+        buf[i] = (char)tolower((unsigned char)str->chars[i]);
+    }
+    buf[str->length] = '\0';
+    ObjString* result = copyString(vm, buf, str->length);
+    free(buf);
+    return OBJ_VAL(result);
+}
+
+static Value isNumberNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1 || !IS_STRING(args[0])) return BOOL_VAL(false);
+    ObjString* str = AS_STRING(args[0]);
+    if (str->length == 0) return BOOL_VAL(false);
+    for (int i = 0; i < str->length; i++) {
+        if (!isdigit((unsigned char)str->chars[i])) return BOOL_VAL(false);
+    }
+    return BOOL_VAL(true);
+}
+
+static Value isAlphaNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1 || !IS_STRING(args[0])) return BOOL_VAL(false);
+    ObjString* str = AS_STRING(args[0]);
+    if (str->length == 0) return BOOL_VAL(false);
+    for (int i = 0; i < str->length; i++) {
+        if (!isalpha((unsigned char)str->chars[i])) return BOOL_VAL(false);
+    }
+    return BOOL_VAL(true);
+}
+
+// ---- Extended List Functions ----
+
+static Value sumNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 1 || !IS_LIST(args[0])) return NUMBER_VAL(0);
+    ObjList* list = AS_LIST(args[0]);
+    double total = 0;
+    for (int i = 0; i < list->count; i++) {
+        if (IS_NUMBER(list->items[i])) total += AS_NUMBER(list->items[i]);
+    }
+    return NUMBER_VAL(total);
+}
+
+static Value uniqueNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 1 || !IS_LIST(args[0])) return NIL_VAL;
+    ObjList* src = AS_LIST(args[0]);
+    ObjList* result = newList(vm);
+    *vm->stackTop++ = OBJ_VAL(result); // GC protect
+    for (int i = 0; i < src->count; i++) {
+        bool found = false;
+        for (int j = 0; j < result->count; j++) {
+            if (valuesEqual(src->items[i], result->items[j])) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) listAppend(vm, result, src->items[i]);
+    }
+    vm->stackTop--;
+    return OBJ_VAL(result);
+}
+
+static Value sliceNative(VM* vm, int argCount, Value* args) {
+    if (argCount < 2 || !IS_LIST(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    ObjList* list = AS_LIST(args[0]);
+    int start = (int)AS_NUMBER(args[1]);
+    if (start < 0) start += list->count;
+    if (start < 0) start = 0;
+    int end = list->count;
+    if (argCount >= 3 && IS_NUMBER(args[2])) {
+        end = (int)AS_NUMBER(args[2]);
+        if (end < 0) end += list->count;
+    }
+    if (end > list->count) end = list->count;
+    if (start >= end) return OBJ_VAL(newList(vm));
+
+    ObjList* result = newList(vm);
+    *vm->stackTop++ = OBJ_VAL(result); // GC protect
+    for (int i = start; i < end; i++) {
+        listAppend(vm, result, list->items[i]);
+    }
+    vm->stackTop--;
+    return OBJ_VAL(result);
+}
+
+static Value insertNative(VM* vm, int argCount, Value* args) {
+    if (argCount != 3 || !IS_LIST(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    ObjList* list = AS_LIST(args[0]);
+    int index = (int)AS_NUMBER(args[1]);
+    if (index < 0) index += list->count;
+    if (index < 0) index = 0;
+    if (index > list->count) index = list->count;
+
+    listAppend(vm, list, NIL_VAL); // grow by one
+    for (int i = list->count - 1; i > index; i--) {
+        list->items[i] = list->items[i - 1];
+    }
+    list->items[index] = args[2];
+    return args[0];
+}
+
+static Value findNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 2 || !IS_LIST(args[0])) return NUMBER_VAL(-1);
+    ObjList* list = AS_LIST(args[0]);
+    for (int i = 0; i < list->count; i++) {
+        if (valuesEqual(list->items[i], args[1])) return NUMBER_VAL((double)i);
+    }
+    return NUMBER_VAL(-1);
+}
+
+static Value removeNative(VM* vm, int argCount, Value* args) {
+    (void)vm;
+    if (argCount != 2 || !IS_LIST(args[0]) || !IS_NUMBER(args[1])) return NIL_VAL;
+    ObjList* list = AS_LIST(args[0]);
+    int index = (int)AS_NUMBER(args[1]);
+    if (index < 0) index += list->count;
+    if (index < 0 || index >= list->count) return NIL_VAL;
+
+    Value removed = list->items[index];
+    for (int i = index; i < list->count - 1; i++) {
+        list->items[i] = list->items[i + 1];
+    }
+    list->count--;
+    return removed;
+}
+
 static Value numNative(VM* vm, int argCount, Value* args) {
     (void)vm;
     if (argCount != 1) return NIL_VAL;
@@ -623,19 +915,29 @@ static Value numNative(VM* vm, int argCount, Value* args) {
 }
 
 static Value sortNative(VM* vm, int argCount, Value* args) {
-    (void)vm;
-    if (argCount != 1 || !IS_LIST(args[0])) return NIL_VAL;
+    if (argCount < 1 || !IS_LIST(args[0])) return NIL_VAL;
     ObjList* list = AS_LIST(args[0]);
+    bool hasComparator = argCount >= 2 && (IS_CLOSURE(args[1]) || IS_NATIVE(args[1]));
 
-    // Simple bubble sort (good enough for scripting)
+    // Bubble sort with number, string, and custom comparator support
     for (int i = 0; i < list->count - 1; i++) {
         for (int j = 0; j < list->count - i - 1; j++) {
-            if (IS_NUMBER(list->items[j]) && IS_NUMBER(list->items[j+1])) {
-                if (AS_NUMBER(list->items[j]) > AS_NUMBER(list->items[j+1])) {
-                    Value tmp = list->items[j];
-                    list->items[j] = list->items[j+1];
-                    list->items[j+1] = tmp;
-                }
+            bool swap = false;
+            if (hasComparator) {
+                *vm->stackTop++ = args[1]; // callee
+                *vm->stackTop++ = list->items[j];
+                *vm->stackTop++ = list->items[j+1];
+                Value result = vmCallFunction(vm, args[1], 2);
+                swap = IS_NUMBER(result) && AS_NUMBER(result) > 0;
+            } else if (IS_NUMBER(list->items[j]) && IS_NUMBER(list->items[j+1])) {
+                swap = AS_NUMBER(list->items[j]) > AS_NUMBER(list->items[j+1]);
+            } else if (IS_STRING(list->items[j]) && IS_STRING(list->items[j+1])) {
+                swap = strcmp(AS_CSTRING(list->items[j]), AS_CSTRING(list->items[j+1])) > 0;
+            }
+            if (swap) {
+                Value tmp = list->items[j];
+                list->items[j] = list->items[j+1];
+                list->items[j+1] = tmp;
             }
         }
     }
@@ -874,7 +1176,7 @@ void initVM(VM* vm) {
     defineNative(vm, "read", readFileNative, 1);
     defineNative(vm, "write", writeFileNative, 2);
 
-    defineNative(vm, "env", envNative, 1);
+    defineNative(vm, "env", envNative, -1);
     defineNative(vm, "sleep", sleepNative, 1);
     defineNative(vm, "assert", assertNative, -1);
 
@@ -886,12 +1188,31 @@ void initVM(VM* vm) {
     defineNative(vm, "lower", lowerNative, 1);
     defineNative(vm, "starts_with", startsWithNative, 2);
     defineNative(vm, "ends_with", endsWithNative, 2);
+    defineNative(vm, "substr", substrNative, -1);
+    defineNative(vm, "index_of", indexOfNative, 2);
+    defineNative(vm, "repeat", repeatNative, 2);
+    defineNative(vm, "reverse", reverseNative, 1);
+    defineNative(vm, "lstrip", lstripNative, 1);
+    defineNative(vm, "rstrip", rstripNative, 1);
+    defineNative(vm, "char_at", charAtNative, 2);
+    defineNative(vm, "pad_start", padStartNative, -1);
+    defineNative(vm, "pad_end", padEndNative, -1);
+    defineNative(vm, "count", countNative, 2);
+    defineNative(vm, "capitalize", capitalizeNative, 1);
+    defineNative(vm, "is_number", isNumberNative, 1);
+    defineNative(vm, "is_alpha", isAlphaNative, 1);
 
     // Collections
-    defineNative(vm, "sort", sortNative, 1);
+    defineNative(vm, "sort", sortNative, -1);
     defineNative(vm, "map_fn", mapFnNative, 2);
     defineNative(vm, "filter", filterNative, 2);
     defineNative(vm, "reduce", reduceNative, -1);
+    defineNative(vm, "slice", sliceNative, -1);
+    defineNative(vm, "insert", insertNative, 3);
+    defineNative(vm, "find", findNative, 2);
+    defineNative(vm, "remove", removeNative, 2);
+    defineNative(vm, "sum", sumNative, 1);
+    defineNative(vm, "unique", uniqueNative, 1);
 
     // Type conversions
     defineNative(vm, "num", numNative, 1);
@@ -908,6 +1229,7 @@ void initVM(VM* vm) {
     registerSysModule(vm);
     registerMathModule(vm);
     registerRegexModule(vm);
+    registerBitModule(vm);
 }
 
 void freeVM(VM* vm) {
@@ -963,6 +1285,15 @@ void vmRaiseError(VM* vm, const char* message, const char* type) {
     ObjString* typeVal = copyString(vm, type, (int)strlen(type));
     tableSet(&errorMap->table, typeKey, OBJ_VAL(typeVal));
 
+    if (vm->frameCount > 0) {
+        CallFrame* frame = &vm->frames[vm->frameCount - 1];
+        ObjFunction* fn = frame->closure->function;
+        size_t instruction = frame->ip - fn->chunk.code - 1;
+        int line = fn->chunk.lines[instruction];
+        ObjString* lineKey = copyString(vm, "line", 4);
+        tableSet(&errorMap->table, lineKey, NUMBER_VAL((double)line));
+    }
+
     vmPop(vm);
 
     vm->hasError = true;
@@ -1008,6 +1339,15 @@ static void raiseError(VM* vm, const char* message, const char* type) {
     ObjString* typeKey = copyString(vm, "type", 4);
     ObjString* typeVal = copyString(vm, type, (int)strlen(type));
     tableSet(&errorMap->table, typeKey, OBJ_VAL(typeVal));
+
+    if (vm->frameCount > 0) {
+        CallFrame* frame = &vm->frames[vm->frameCount - 1];
+        ObjFunction* fn = frame->closure->function;
+        size_t instruction = frame->ip - fn->chunk.code - 1;
+        int line = fn->chunk.lines[instruction];
+        ObjString* lineKey = copyString(vm, "line", 4);
+        tableSet(&errorMap->table, lineKey, NUMBER_VAL((double)line));
+    }
 
     pop(vm);
 

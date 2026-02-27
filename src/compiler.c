@@ -833,11 +833,15 @@ static void compileNode(Compiler* compiler, AstNode* node) {
             compilePipe(compiler, node);
             break;
 
-        case NODE_RANGE:
-            // Range literals aren't a standalone runtime value yet —
-            // the for-in loop uses hidden index locals instead.
+        case NODE_RANGE: {
+            // 1..10 compiles as range(1, 10) — produces a real list value
+            uint8_t nameConst = identifierConstant(compiler, "range", 5);
+            emitBytes(compiler, OP_GET_GLOBAL, nameConst, node->line);
             compileExpression(compiler, node->as.range.start);
+            compileExpression(compiler, node->as.range.end);
+            emitBytes(compiler, OP_CALL, 2, node->line);
             break;
+        }
 
         case NODE_LAMBDA: {
             compileFunction(compiler, node, TYPE_LAMBDA);
